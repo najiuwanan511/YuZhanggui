@@ -1,0 +1,67 @@
+package com.yuzhanggui.service;
+
+import com.yuzhanggui.common.ResultObject;
+import com.yuzhanggui.entity.XianyuChatMessage;
+import com.yuzhanggui.controller.dto.MsgContextReqDTO;
+import com.yuzhanggui.controller.dto.MsgListReqDTO;
+import com.yuzhanggui.controller.dto.MsgListRespDTO;
+import com.yuzhanggui.controller.dto.ChatSessionDTO;
+import com.yuzhanggui.controller.dto.ChatSessionReqDTO;
+import com.yuzhanggui.controller.dto.ChatSessionReadReqDTO;
+import com.yuzhanggui.controller.dto.ChatBuyerTagReqDTO;
+import java.util.List;
+
+/**
+ * 聊天消息服务接口
+ * 
+ * <p>职责：提供消息查询相关的服务</p>
+ * <p>注意：WebSocket 消息的解析和保存现在由 SyncMessageHandler 直接处理</p>
+ */
+public interface ChatMessageService {
+    
+    /**
+     * 查询账号的聊天消息
+     * 
+     * @param accountId 账号ID
+     * @param page 页码（从1开始）
+     * @param pageSize 每页大小
+     * @return 消息列表
+     */
+    List<XianyuChatMessage> getMessagesByAccountId(Long accountId, int page, int pageSize);
+    
+    /**
+     * 查询会话的聊天消息
+     * 
+     * @param sessionId 会话ID
+     * @return 消息列表
+     */
+    List<XianyuChatMessage> getMessagesBySessionId(String sessionId);
+    
+    /**
+     * 分页查询消息列表
+     * 
+     * @param reqDTO 查询请求参数
+     * @return 消息列表响应
+     */
+    ResultObject<MsgListRespDTO> getMessageList(MsgListReqDTO reqDTO);
+    
+    /**
+     * 根据会话ID获取上下文消息（最近N条）
+     * 
+     * @param reqDTO 查询请求参数（sid, limit）
+     * @return 消息列表
+     */
+    ResultObject<?> getContextMessages(MsgContextReqDTO reqDTO);
+
+    /** 查询账号最近活跃会话，供在线客服使用。 */
+    ResultObject<List<ChatSessionDTO>> getSessionList(ChatSessionReqDTO reqDTO);
+
+    /** 将一个在线客服会话标记为已读。 */
+    ResultObject<String> markSessionRead(ChatSessionReadReqDTO reqDTO);
+
+    /** 为买家新增一个自定义标签。 */
+    ResultObject<String> addBuyerTag(ChatBuyerTagReqDTO reqDTO);
+
+    /** 删除买家的一个自定义标签。 */
+    ResultObject<String> removeBuyerTag(ChatBuyerTagReqDTO reqDTO);
+}

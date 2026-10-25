@@ -1,0 +1,509 @@
+package com.yuzhanggui.service.impl;
+
+import com.yuzhanggui.controller.dto.ProductPublishReqDTO;
+import com.yuzhanggui.controller.dto.ProductPublishRespDTO;
+import com.yuzhanggui.controller.dto.ProductPublishLocationDTO;
+import com.yuzhanggui.controller.dto.PublishCapabilityCheckRespDTO;
+import com.yuzhanggui.exception.BusinessException;
+import com.yuzhanggui.service.AccountService;
+import com.yuzhanggui.service.ProductPublishService;
+import com.yuzhanggui.service.PublishCapabilityProbeService;
+import com.yuzhanggui.utils.XianyuApiCallUtils;
+import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.net.URI;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Locale;
+import java.util.Set;
+import java.util.UUID;
+import java.util.HashSet;
+import java.util.concurrent.ConcurrentHashMap;
+
+@Service
+public class ProductPublishServiceImpl implements ProductPublishService {
+
+    static final String PUBLISH_API = "mtop.idle.pc.idleitem.publish";
+    private static final Set<String> SUPPORTED_FORM_LEVELS = Set.of("GENERAL_FORM", "SERVICE_FORM");
+    private static final Set<String> DELIVERY_MODES = Set.of("FREE", "FLAT", "NONE", "SELF_PICKUP");
+    private static final Set<String> TRUSTED_IMAGE_SUFFIXES = Set.of("alicdn.com", "tbcdn.cn", "goofish.com");
+    private static final double DEFAULT_LONGITUDE = 121.4737;
+    private static final double DEFAULT_LATITUDE = 31.2304;
+
+    private final PublishCapabilityProbeService probeService;
+    private final AccountService accountService;
+    private final XianyuApiCallUtils apiCallUtils;
+    private final Map<String, ProductPublishRespDTO> completedRequests = new ConcurrentHashMap<>();
+
+    public ProductPublishServiceImpl(PublishCapabilityProbeService probeService,
+                                     AccountService accountService,
+                                     XianyuApiCallUtils apiCallUtils) {
+        this.probeService = probeService;
+        this.accountService = accountService;
+        this.apiCallUtils = apiCallUtils;
+    }
+
+    @Override
+    public synchronized ProductPublishRespDTO publish(ProductPublishReqDTO request) {
+        validateBasic(request);
+        ProductPublishRespDTO completed = completedRequests.get(request.getRequestId());
+        if (completed != null) {
+            return completed;
+        }
+
+        PublishCapabilityCheckRespDTO schema = probeService.check(
+                request.getAccountId(), request.getTitle(), request.getDescription(),
+                request.getImages(), request.getProperties());
+        if (!schema.isCategoryApiReady() || !schema.isLocationApiReady()) {
+            throw new BusinessException(409, "发布前置检查未通过：" + schema.getSummary());
+        }
+        if (!SUPPORTED_FORM_LEVELS.contains(schema.getSupportLevel())) {
+            throw new BusinessException(409, "当前类目属于专项流程，暂不允许按普通商品发布：" + schema.getSupportLabel());
+        }
+        if (schema.getProperties().stream().anyMatch(property -> property.isRequired() && property.isDependent())) {
+            throw new BusinessException(409, "当前类目仍有必填联动属性未加载，请完善品牌、型号或上级属性后重新检测");
+        }
+
+        List<Map<String, Object>> labels = resolveLabels(schema, request.getProperties());
+        validateServiceFormLabels(schema, labels);
+        Map<String, Object> location = resolveLocation(request);
+        Map<String, Object> payload = buildPayload(request, schema, labels, location);
+        String cookie = accountService.getCookieByAccountId(request.getAccountId());
+        XianyuApiCallUtils.ApiCallResult result = apiCallUtils.callApiWithRetry(
+                request.getAccountId(), PUBLISH_API, payload, cookie, "1.0", null, null);
+        if (!result.isSuccess()) {
+            if (result.getResponse() == null || result.getResponse().isBlank()) {
+                ProductPublishRespDTO uncertain = new ProductPublishRespDTO(false, "",
+                        "发布结果暂时无法确认，请先同步商品列表检查，切勿立即重复发布");
+                completedRequests.put(request.getRequestId(), uncertain);
+                return uncertain;
+            }
+            throw new BusinessException(502, "闲鱼发布失败：" + safeError(result));
+        }
+
+        Map<String, Object> data = result.extractData();
+        String itemId = firstText(data, "itemId", "idleItemId", "id");
+        ProductPublishRespDTO response = new ProductPublishRespDTO(true, itemId,
+                itemId.isBlank() ? "闲鱼已接受发布请求，请同步商品列表确认" : "商品发布成功");
+        if (completedRequests.size() > 500) {
+            completedRequests.clear();
+        }
+        completedRequests.put(request.getRequestId(), response);
+        return response;
+    }
+
+    @Override
+    public List<ProductPublishLocationDTO> listLocations(Long accountId, Double longitude, Double latitude) {
+        if (accountId == null) throw new BusinessException(400, "请选择发布账号");
+        double queryLongitude = longitude == null ? DEFAULT_LONGITUDE : longitude;
+        double queryLatitude = latitude == null ? DEFAULT_LATITUDE : latitude;
+        if (queryLongitude < -180 || queryLongitude > 180 || queryLatitude < -90 || queryLatitude > 90) {
+            throw new BusinessException(400, "位置坐标不正确");
+        }
+        String cookie = accountService.getCookieByAccountId(accountId);
+        if (cookie == null || cookie.isBlank()) throw new BusinessException(409, "账号 Cookie 不可用，请先到账号管理更新凭证");
+        XianyuApiCallUtils.ApiCallResult result = apiCallUtils.callApiWithRetry(accountId,
+                PublishCapabilityProbeService.LOCATION_API,
+                Map.of("longitude", queryLongitude, "latitude", queryLatitude), cookie, "1.0", null, null);
+        Map<String, Object> data = result.extractData();
+        if (!result.isSuccess() || data == null) {
+            throw new BusinessException(409, "闲鱼没有返回可用的发布地点");
+        }
+
+        List<ProductPublishLocationDTO> locations = new ArrayList<>();
+        Set<String> keys = new HashSet<>();
+        addLocation(locations, keys, data.get("selectedPoi"), "SELECTED", true);
+        addLocationList(locations, keys, data.get("commonAddresses"), "COMMON");
+        addLocationList(locations, keys, data.get("poiList"), "NEARBY");
+        if (locations.isEmpty()) throw new BusinessException(409, "账号没有可用的发布地点，请先在闲鱼发布页选择一次地点");
+        return locations;
+    }
+
+    private void validateBasic(ProductPublishReqDTO request) {
+        if (request == null || request.getAccountId() == null) {
+            throw new BusinessException(400, "请选择发布账号");
+        }
+        if (!request.isAcknowledged()) {
+            throw new BusinessException(400, "Please confirm the pre-publish checklist");
+        }
+        if (request.getRequestId() == null || request.getRequestId().isBlank()) {
+            throw new BusinessException(400, "发布请求缺少唯一编号，请刷新页面重试");
+        }
+        try {
+            UUID.fromString(request.getRequestId());
+        } catch (IllegalArgumentException e) {
+            throw new BusinessException(400, "发布请求编号格式不正确");
+        }
+        String title = trim(request.getTitle());
+        String description = trim(request.getDescription());
+        if (title.length() < 2 || title.length() > 60) {
+            throw new BusinessException(400, "商品标题请填写 2 到 60 个字符");
+        }
+        if (description.length() < 2 || description.length() > 5000) {
+            throw new BusinessException(400, "商品描述请填写 2 到 5000 个字符");
+        }
+        if (hasSkuSpecs(request)) {
+            validateSkuSpecs(request);
+        } else {
+            validateMoney(request.getPrice(), "售价", true);
+            validateMoney(request.getOriginalPrice(), "原价", false);
+            if (request.getQuantity() == null || request.getQuantity() < 1 || request.getQuantity() > 999) {
+                throw new BusinessException(400, "库存数量必须在 1 到 999 之间");
+            }
+        }
+        if (!DELIVERY_MODES.contains(request.getDeliveryMode())) {
+            throw new BusinessException(400, "请选择有效的交付方式");
+        }
+        if ("FLAT".equals(request.getDeliveryMode())) {
+            validateMoney(request.getPostFee(), "运费", false);
+        }
+        if (request.getImages() == null || request.getImages().isEmpty() || request.getImages().size() > 9) {
+            throw new BusinessException(400, "请上传 1 到 9 张商品图片");
+        }
+        for (ProductPublishReqDTO.Image image : request.getImages()) {
+            validateImage(image);
+        }
+    }
+
+    private void validateMoney(BigDecimal value, String field, boolean required) {
+        if (value == null) {
+            if (required) throw new BusinessException(400, "请填写" + field);
+            return;
+        }
+        if (value.compareTo(BigDecimal.ZERO) < (required ? 1 : 0) || value.compareTo(new BigDecimal("9999999")) > 0) {
+            throw new BusinessException(400, field + "金额不正确");
+        }
+    }
+
+    private boolean hasSkuSpecs(ProductPublishReqDTO request) {
+        return request.getSkuSpecs() != null && !request.getSkuSpecs().isEmpty();
+    }
+
+    private void validateSkuSpecs(ProductPublishReqDTO request) {
+        List<ProductPublishReqDTO.SkuSpec> specs = request.getSkuSpecs();
+        if (specs.size() < 2 || specs.size() > 20) {
+            throw new BusinessException(400, "多规格商品需要填写 2 到 20 个规格");
+        }
+        String propertyName = trim(request.getSkuPropertyName());
+        if (propertyName.isBlank() || propertyName.length() > 30) {
+            throw new BusinessException(400, "规格名称需要在 1 到 30 个字符之间");
+        }
+        Set<String> names = new HashSet<>();
+        int totalQuantity = 0;
+        for (ProductPublishReqDTO.SkuSpec spec : specs) {
+            if (spec == null) throw new BusinessException(400, "规格信息不完整");
+            String name = trim(spec.getName());
+            if (name.isBlank() || name.length() > 50) {
+                throw new BusinessException(400, "规格选项需要在 1 到 50 个字符之间");
+            }
+            if (!names.add(name.toLowerCase(Locale.ROOT))) {
+                throw new BusinessException(400, "规格选项不能重复：" + name);
+            }
+            validateMoney(spec.getPrice(), "规格“" + name + "”售价", true);
+            validateMoney(spec.getOriginalPrice(), "规格“" + name + "”原价", false);
+            if (spec.getQuantity() == null || spec.getQuantity() < 1 || spec.getQuantity() > 999) {
+                throw new BusinessException(400, "规格“" + name + "”库存必须在 1 到 999 之间");
+            }
+            totalQuantity += spec.getQuantity();
+            if (totalQuantity > 999) {
+                throw new BusinessException(400, "多规格商品总库存不能超过 999");
+            }
+        }
+    }
+
+    private void validateImage(ProductPublishReqDTO.Image image) {
+        if (image == null || image.getWidth() == null || image.getHeight() == null ||
+                image.getWidth() < 1 || image.getHeight() < 1 || image.getWidth() > 10000 || image.getHeight() > 10000) {
+            throw new BusinessException(400, "商品图片尺寸信息不正确");
+        }
+        try {
+            URI uri = URI.create(image.getUrl());
+            String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase();
+            boolean trusted = ("https".equalsIgnoreCase(uri.getScheme()) || "http".equalsIgnoreCase(uri.getScheme())) && TRUSTED_IMAGE_SUFFIXES.stream()
+                    .anyMatch(suffix -> host.equals(suffix) || host.endsWith("." + suffix));
+            if (!trusted) throw new IllegalArgumentException();
+        } catch (Exception e) {
+            throw new BusinessException(400, "商品图片必须先上传到可信的闲鱼图片域名");
+        }
+    }
+
+    private List<Map<String, Object>> resolveLabels(PublishCapabilityCheckRespDTO schema,
+                                                     List<ProductPublishReqDTO.PropertySelection> selections) {
+        Map<String, List<ProductPublishReqDTO.PropertySelection>> selectedByProperty = new LinkedHashMap<>();
+        for (ProductPublishReqDTO.PropertySelection selection : selections == null ? List.<ProductPublishReqDTO.PropertySelection>of() : selections) {
+            if (selection != null && selection.getPropertyId() != null && selection.getValueKey() != null) {
+                selectedByProperty.computeIfAbsent(selection.getPropertyId(), ignored -> new ArrayList<>()).add(selection);
+            }
+        }
+        List<Map<String, Object>> labels = new ArrayList<>();
+        for (PublishCapabilityCheckRespDTO.Property property : schema.getProperties()) {
+            List<ProductPublishReqDTO.PropertySelection> selectedValues = selectedByProperty.getOrDefault(property.getPropertyId(), List.of());
+            List<PublishCapabilityCheckRespDTO.Option> options = new ArrayList<>();
+            for (ProductPublishReqDTO.PropertySelection selected : selectedValues) {
+                PublishCapabilityCheckRespDTO.Option option = property.getOptions().stream()
+                        .filter(candidate -> selected.getValueKey().equals(candidate.getValueId()) || selected.getValueKey().equals(candidate.getValueName()))
+                        .findFirst().orElse(null);
+                if (option == null) {
+                    throw new BusinessException(409, "属性“" + property.getPropertyName() + "”的选项已经变化，请重新检测类目");
+                }
+                options.add(option);
+            }
+            if (options.isEmpty()) {
+                property.getOptions().stream().filter(PublishCapabilityCheckRespDTO.Option::isSelected).findFirst().ifPresent(options::add);
+            }
+            if (property.isRequired() && options.isEmpty()) {
+                throw new BusinessException(400, "请选择必填属性：" + property.getPropertyName());
+            }
+            if (!property.isMultiple() && options.size() > 1) {
+                throw new BusinessException(400, "属性“" + property.getPropertyName() + "”只能选择一项");
+            }
+            for (PublishCapabilityCheckRespDTO.Option option : options) {
+                labels.add(buildLabel(property, option));
+            }
+        }
+        return labels;
+    }
+
+    private Map<String, Object> buildLabel(PublishCapabilityCheckRespDTO.Property property,
+                                           PublishCapabilityCheckRespDTO.Option option) {
+        Map<String, Object> label = new LinkedHashMap<>();
+        label.put("channelCateName", option.getValueName());
+        label.put("valueId", null);
+        label.put("channelCateId", option.getChannelCategoryId());
+        label.put("valueName", null);
+        label.put("tbCatId", option.getTaobaoCategoryId());
+        label.put("subPropertyId", null);
+        label.put("labelType", "common");
+        label.put("subValueId", null);
+        label.put("labelId", null);
+        label.put("propertyName", property.getPropertyName());
+        label.put("isUserClick", "1");
+        label.put("isUserCancel", null);
+        label.put("from", "newPublishChoice");
+        label.put("propertyId", property.getPropertyId());
+        label.put("labelFrom", "newPublish");
+        label.put("text", option.getValueName());
+        label.put("properties", property.getPropertyId() + "##" + property.getPropertyName() + ":" +
+                option.getChannelCategoryId() + "##" + option.getValueName());
+        return label;
+    }
+
+    private void validateServiceFormLabels(PublishCapabilityCheckRespDTO schema, List<Map<String, Object>> labels) {
+        if (!"SERVICE_FORM".equals(schema.getSupportLevel())) {
+            return;
+        }
+        boolean hasDeliveryPeriod = false;
+        boolean hasServiceType = false;
+        boolean hasPricing = false;
+        for (Map<String, Object> label : labels) {
+            String propertyName = value(label, "propertyName");
+            hasDeliveryPeriod |= propertyName.contains("交付周期");
+            hasServiceType |= propertyName.contains("服务类型");
+            hasPricing |= propertyName.contains("计价方式");
+        }
+        if (!hasDeliveryPeriod || !hasServiceType || !hasPricing) {
+            throw new BusinessException(400, "拼单/助力服务请完整选择交付周期、服务类型和计价方式");
+        }
+    }
+
+    private Map<String, Object> resolveLocation(ProductPublishReqDTO request) {
+        ProductPublishReqDTO.Address requested = request.getAddress();
+        Double longitude = requested == null ? null : requested.getLookupLongitude();
+        Double latitude = requested == null ? null : requested.getLookupLatitude();
+        List<ProductPublishLocationDTO> locations = listLocations(request.getAccountId(), longitude, latitude);
+        ProductPublishLocationDTO chosen;
+        if (requested == null || requested.getLocationKey() == null || requested.getLocationKey().isBlank()) {
+            chosen = locations.stream().filter(ProductPublishLocationDTO::isSelected).findFirst().orElse(locations.get(0));
+        } else {
+            chosen = locations.stream().filter(location -> requested.getLocationKey().equals(location.getKey()))
+                    .findFirst().orElseThrow(() -> new BusinessException(409, "所选发布地点已经变化，请重新加载地址"));
+        }
+        String customName = requested == null ? "" : trim(requested.getCustomPoiName());
+        if (customName.length() > 100) throw new BusinessException(400, "自定义地点名称不能超过 100 个字符");
+        Map<String, Object> location = new LinkedHashMap<>();
+        location.put("area", chosen.getDistrict());
+        location.put("city", chosen.getCity());
+        location.put("divisionId", chosen.getDivisionId());
+        location.put("longitude", chosen.getLongitude());
+        location.put("latitude", chosen.getLatitude());
+        location.put("poiId", chosen.getPoiId());
+        location.put("poi", customName.isBlank() ? chosen.getPoiName() : customName);
+        location.put("prov", chosen.getProvince());
+        return location;
+    }
+
+    private Object nonEmptyMap(Object value) {
+        return value instanceof Map<?, ?> map && !map.isEmpty() ? map : null;
+    }
+
+    private void addLocationList(List<ProductPublishLocationDTO> locations, Set<String> keys, Object rawList, String source) {
+        if (!(rawList instanceof List<?> list)) return;
+        for (Object value : list) addLocation(locations, keys, value, source, false);
+    }
+
+    private void addLocation(List<ProductPublishLocationDTO> locations, Set<String> keys, Object rawValue,
+                             String source, boolean selected) {
+        Object rawLocation = nonEmptyMap(rawValue);
+        if (!(rawLocation instanceof Map<?, ?> raw)) return;
+        Map<String, Object> location = new LinkedHashMap<>();
+        raw.forEach((key, value) -> location.put(String.valueOf(key), value));
+        normalizeLocation(location);
+        if (value(location, "divisionId").isBlank() && value(location, "city").isBlank()) return;
+
+        ProductPublishLocationDTO dto = new ProductPublishLocationDTO();
+        dto.setSource(source);
+        dto.setSelected(selected);
+        dto.setProvince(value(location, "prov"));
+        dto.setCity(value(location, "city"));
+        dto.setDistrict(value(location, "area"));
+        dto.setDivisionId(value(location, "divisionId"));
+        dto.setPoiId(value(location, "poiId"));
+        dto.setPoiName(value(location, "poi"));
+        dto.setLongitude(value(location, "longitude"));
+        dto.setLatitude(value(location, "latitude"));
+        dto.setKey(String.join("|", dto.getDivisionId(), dto.getPoiId(), dto.getLongitude(), dto.getLatitude()));
+        dto.setDisplayName(joinLocation(dto.getProvince(), dto.getCity(), dto.getDistrict(), dto.getPoiName()));
+        if (keys.add(dto.getKey())) locations.add(dto);
+    }
+
+    private String joinLocation(String... parts) {
+        StringBuilder result = new StringBuilder();
+        for (String part : parts) {
+            if (part != null && !part.isBlank() && !result.toString().endsWith(part)) result.append(part);
+        }
+        return result.length() == 0 ? "未命名地点" : result.toString();
+    }
+
+    /** 兼容 selectedPoi 与 commonAddresses 使用的不同字段名。 */
+    private void normalizeLocation(Map<String, Object> location) {
+        alias(location, "poi", "poiName", "name");
+        alias(location, "poiId", "id");
+        alias(location, "prov", "province", "provinceName");
+        alias(location, "city", "cityName");
+        alias(location, "area", "district", "districtName");
+        alias(location, "divisionId", "adCode", "areaCode");
+        Object longitude = location.get("longitude");
+        Object latitude = location.get("latitude");
+        if ((longitude == null || latitude == null) && location.get("gps") != null) {
+            String[] gps = String.valueOf(location.get("gps")).split(",", 2);
+            if (gps.length == 2) {
+                location.putIfAbsent("longitude", gps[0]);
+                location.putIfAbsent("latitude", gps[1]);
+            }
+        }
+    }
+
+    private void alias(Map<String, Object> location, String target, String... sources) {
+        if (location.get(target) != null && !String.valueOf(location.get(target)).isBlank()) return;
+        for (String source : sources) {
+            Object value = location.get(source);
+            if (value != null && !String.valueOf(value).isBlank()) {
+                location.put(target, value);
+                return;
+            }
+        }
+    }
+
+    private Map<String, Object> buildPayload(ProductPublishReqDTO request, PublishCapabilityCheckRespDTO schema,
+                                             List<Map<String, Object>> labels, Map<String, Object> location) {
+        boolean skuMode = hasSkuSpecs(request);
+        BigDecimal listingPrice = skuMode ? request.getSkuSpecs().stream()
+                .map(ProductPublishReqDTO.SkuSpec::getPrice).min(BigDecimal::compareTo).orElseThrow() : request.getPrice();
+        int listingQuantity = skuMode ? request.getSkuSpecs().stream()
+                .mapToInt(ProductPublishReqDTO.SkuSpec::getQuantity).sum() : request.getQuantity();
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("freebies", false);
+        payload.put("itemTypeStr", "b");
+        payload.put("quantity", String.valueOf(listingQuantity));
+        payload.put("simpleItem", "true");
+        List<Map<String, Object>> images = new ArrayList<>();
+        for (int i = 0; i < request.getImages().size(); i++) {
+            ProductPublishReqDTO.Image image = request.getImages().get(i);
+            Map<String, Object> info = new LinkedHashMap<>();
+            info.put("extraInfo", Map.of("isH", "false", "isT", "false", "raw", "false"));
+            info.put("isQrCode", false);
+            info.put("url", image.getUrl());
+            info.put("heightSize", image.getHeight());
+            info.put("widthSize", image.getWidth());
+            info.put("major", i == 0);
+            info.put("type", 0);
+            info.put("status", "done");
+            images.add(info);
+        }
+        payload.put("imageInfoDOList", images);
+        payload.put("itemTextDTO", Map.of("desc", trim(request.getDescription()), "title", trim(request.getTitle()), "titleDescSeparate", true));
+        payload.put("itemLabelExtList", labels);
+        Map<String, Object> price = new LinkedHashMap<>();
+        price.put("priceInCent", cents(listingPrice));
+        if (!skuMode && request.getOriginalPrice() != null) price.put("origPriceInCent", cents(request.getOriginalPrice()));
+        payload.put("itemPriceDTO", price);
+        if (skuMode) {
+            payload.put("itemSkuList", buildSkuList(request));
+        }
+        payload.put("userRightsProtocols", List.of(Map.of("enable", false, "serviceCode", "SKILL_PLAY_NO_MIND")));
+        payload.put("itemPostFeeDTO", postFee(request));
+        payload.put("itemAddrDTO", Map.of(
+                "area", value(location, "area"), "city", value(location, "city"),
+                "divisionId", value(location, "divisionId"),
+                "gps", value(location, "longitude") + "," + value(location, "latitude"),
+                "poiId", value(location, "poiId"), "poiName", value(location, "poi"), "prov", value(location, "prov")));
+        payload.put("defaultPrice", false);
+        payload.put("itemCatDTO", Map.of("catId", schema.getCategoryId(), "catName", schema.getCategoryName(),
+                "channelCatId", schema.getChannelCategoryId(), "tbCatId", schema.getTaobaoCategoryId()));
+        payload.put("uniqueCode", String.valueOf(System.currentTimeMillis()));
+        payload.put("sourceId", "pcMainPublish");
+        payload.put("bizcode", "pcMainPublish");
+        payload.put("publishScene", "pcMainPublish");
+        return payload;
+    }
+
+    private List<Map<String, Object>> buildSkuList(ProductPublishReqDTO request) {
+        String propertyName = trim(request.getSkuPropertyName());
+        List<Map<String, Object>> skuList = new ArrayList<>();
+        for (int index = 0; index < request.getSkuSpecs().size(); index++) {
+            ProductPublishReqDTO.SkuSpec spec = request.getSkuSpecs().get(index);
+            Map<String, Object> property = new LinkedHashMap<>();
+            property.put("propertyText", propertyName);
+            property.put("valueText", trim(spec.getName()));
+            property.put("propertySortOrder", 0);
+            property.put("valueSortOrder", index);
+
+            Map<String, Object> sku = new LinkedHashMap<>();
+            sku.put("priceInCent", cents(spec.getPrice()));
+            if (spec.getOriginalPrice() != null) sku.put("origPriceInCent", cents(spec.getOriginalPrice()));
+            sku.put("quantity", String.valueOf(spec.getQuantity()));
+            sku.put("propertyList", List.of(property));
+            skuList.add(sku);
+        }
+        return skuList;
+    }
+
+    private Map<String, Object> postFee(ProductPublishReqDTO request) {
+        Map<String, Object> fee = new LinkedHashMap<>();
+        fee.put("canFreeShipping", "FREE".equals(request.getDeliveryMode()));
+        fee.put("supportFreight", "FREE".equals(request.getDeliveryMode()) || "FLAT".equals(request.getDeliveryMode()));
+        fee.put("onlyTakeSelf", "SELF_PICKUP".equals(request.getDeliveryMode()));
+        if ("FLAT".equals(request.getDeliveryMode())) {
+            fee.put("postPriceInCent", cents(request.getPostFee()));
+            fee.put("templateId", "0");
+        } else if ("NONE".equals(request.getDeliveryMode()) || "SELF_PICKUP".equals(request.getDeliveryMode())) {
+            fee.put("templateId", "0");
+        }
+        return fee;
+    }
+
+    private String cents(BigDecimal amount) { return amount.movePointRight(2).setScale(0).toPlainString(); }
+    private String trim(String value) { return value == null ? "" : value.trim(); }
+    private String value(Map<String, Object> map, String key) { return map.get(key) == null ? "" : String.valueOf(map.get(key)); }
+    private String firstText(Map<String, Object> map, String... keys) {
+        if (map == null) return "";
+        for (String key : keys) if (map.get(key) != null && !String.valueOf(map.get(key)).isBlank()) return String.valueOf(map.get(key));
+        return "";
+    }
+    private String safeError(XianyuApiCallUtils.ApiCallResult result) {
+        return result.getErrorMessage() == null || result.getErrorMessage().isBlank() ? "接口未返回明确原因" : result.getErrorMessage();
+    }
+}

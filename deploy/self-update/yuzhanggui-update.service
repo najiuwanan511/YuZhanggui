@@ -1,0 +1,14 @@
+[Unit]
+Description=YuZhanggui online update agent
+After=docker.service network-online.target
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/yuzhanggui/update-agent.env
+ExecStart=/usr/local/lib/yuzhanggui/yuzhanggui-update-agent.sh
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

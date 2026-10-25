@@ -1,0 +1,391 @@
+import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { getAccountList } from '@/api/account'
+import { queryOperationLogs, deleteOldLogs, clearOperationLogs } from '@/api/operation-log'
+import type { OperationLog } from '@/api/operation-log'
+import type { Account } from '@/types'
+import { showSuccess, showError, showInfo, showConfirm } from '@/utils'
+
+// Operation type config
+const operationTypes = [
+  { label: '全部', value: '' },
+  { label: '扫码登录', value: 'LOGIN' },
+  { label: 'WS连接', value: 'WEBSOCKET_CONNECT' },
+  { label: 'WS断开', value: 'WEBSOCKET_DISCONNECT' },
+  { label: '发送消息', value: 'SEND_MESSAGE' },
+  { label: '接收消息', value: 'RECEIVE_MESSAGE' },
+  { label: '自动发货', value: 'AUTO_DELIVERY' },
+  { label: '自动回复', value: 'AUTO_REPLY' },
+  { label: '确认收货', value: 'CONFIRM_SHIPMENT' },
+  { label: 'Token刷新', value: 'TOKEN_REFRESH' },
+  { label: 'Cookie更新', value: 'COOKIE_UPDATE' },
+  { label: '商品同步', value: 'GOODS_SYNC' },
+  { label: '消息同步', value: 'MESSAGE_SYNC' },
+  { label: '通知发送', value: 'NOTIFICATION' }
+]
+
+const operationModules = [
+  { label: '全部', value: '' },
+  { label: '账号', value: 'ACCOUNT' },
+  { label: '消息', value: 'MESSAGE' },
+  { label: '订单', value: 'ORDER' },
+  { label: '商品', value: 'GOODS' },
+  { label: '系统', value: 'SYSTEM' },
+  { label: '通知', value: 'NOTIFICATION' }
+]
+
+const operationStatuses = [
+  { label: '全部', value: '' },
+  { label: '成功', value: 1 },
+  { label: '失败', value: 0 },
+  { label: '部分成功', value: 2 }
+]
+
+export function useOperationLog() {
+  const loading = ref(false)
+  const accounts = ref<Account[]>([])
+  const selectedAccountId = ref<number | null>(null)
+  const logs = ref<OperationLog[]>([])
+  const total = ref(0)
+  const page = ref(1)
+  const pageSize = ref(20)
+
+  // Filters
+  const filterType = ref('')
+  const filterModule = ref('')
+  const filterStatus = ref<string | number>('')
+
+  // Responsive
+  const isMobile = ref(false)
+  const mobileView = ref<'accounts' | 'logs'>('accounts')
+  const selectedAccountForMobile = ref<Account | null>(null)
+
+  // Delete dialog
+  const deleteDialogVisible = ref(false)
+  const deleteDays = ref('')
+  const clearingLogs = ref(false)
+
+  // Check screen size
+  const checkScreenSize = () => {
+    isMobile.value = window.innerWidth < 768
+    if (!isMobile.value) {
+      mobileView.value = 'accounts'
+    }
+  }
+
+  // Mobile go back
+  const goBackToAccounts = () => {
+    mobileView.value = 'accounts'
+  }
+
+  // Current account
+  const currentAccount = computed(() => {
+    return accounts.value.find(acc => acc.id === selectedAccountId.value)
+  })
+
+  // Total pages
+  const totalPages = computed(() => Math.ceil(total.value / pageSize.value))
+
+  // Get account avatar
+  const getAccountAvatar = (account: Account) => {
+    return account.accountNote?.substring(0, 1) || account.id?.toString().substring(0, 1) || '?'
+  }
+
+  // Get account name
+  const getAccountName = (account: Account) => {
+    return account.accountNote || `账号${account.id}`
+  }
+
+  // Resolve the account identity carried by each log. The selected account is
+  // kept as a fallback for logs written before account fields were joined.
+  const getLogAccountName = (log: OperationLog) => {
+    return log.accountNote?.trim()
+      || currentAccount.value?.accountNote?.trim()
+      || `账号 #${log.xianyuAccountId}`
+  }
+
+  const getLogAccountUnb = (log: OperationLog) => {
+    return log.accountUnb?.trim() || currentAccount.value?.unb?.trim() || '-'
+  }
+
+  // Get operation type text
+  const getOperationTypeText = (type: string) => {
+    const item = operationTypes.find(t => t.value === type)
+    return item?.label || type
+  }
+
+  // Get operation type CSS class
+  const getOperationTypeClass = (type: string) => {
+    const map: Record<string, string> = {
+      'LOGIN': 'login',
+      'WEBSOCKET_CONNECT': 'ws-connect',
+      'WEBSOCKET_DISCONNECT': 'ws-disconnect',
+      'SEND_MESSAGE': 'send-msg',
+      'RECEIVE_MESSAGE': 'recv-msg',
+      'AUTO_DELIVERY': 'auto-delivery',
+      'AUTO_REPLY': 'auto-reply',
+      'CONFIRM_SHIPMENT': 'confirm-ship',
+      'TOKEN_REFRESH': 'token-refresh',
+      'COOKIE_UPDATE': 'cookie-update',
+      'GOODS_SYNC': 'goods-sync',
+      'MESSAGE_SYNC': 'msg-sync',
+      'NOTIFICATION': 'notification'
+    }
+    return map[type] || 'default'
+  }
+
+  // Get status text
+  const getStatusText = (status: number) => {
+    const statusMap: Record<number, string> = { 0: '失败', 1: '成功', 2: '部分成功' }
+    return statusMap[status] || '未知'
+  }
+
+  // Get status CSS class
+  const getStatusClass = (status: number) => {
+    const map: Record<number, string> = { 0: 'fail', 1: 'success', 2: 'partial' }
+    return map[status] || 'fail'
+  }
+
+  // Format time
+  const formatTime = (timestamp: string | number) => {
+    const ts = Number(timestamp)
+    if (!ts || isNaN(ts)) return '-'
+    const date = new Date(ts)
+    if (isNaN(date.getTime())) return '-'
+    return date.toLocaleString('zh-CN', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit'
+    })
+  }
+
+  // Format duration
+  const formatDuration = (ms?: number) => {
+    if (!ms) return '-'
+    if (ms < 1000) return `${ms}ms`
+    return `${(ms / 1000).toFixed(2)}s`
+  }
+
+  // Load accounts
+  const loadAccounts = async () => {
+    loading.value = true
+    try {
+      const response = await getAccountList()
+      if (response.code === 0 || response.code === 200) {
+        accounts.value = response.data?.accounts || []
+        if (accounts.value.length > 0 && !selectedAccountId.value) {
+          selectedAccountId.value = accounts.value[0]?.id ?? null
+          loadLogs()
+        }
+      }
+    } catch (error: any) {
+      console.error('加载账号列表失败:', error)
+    } finally {
+      loading.value = false
+    }
+  }
+
+  // Select account
+  const selectAccount = (accountId: number, account?: Account) => {
+    selectedAccountId.value = accountId
+    page.value = 1
+    loadLogs()
+
+    if (isMobile.value && account) {
+      selectedAccountForMobile.value = account
+      mobileView.value = 'logs'
+    }
+  }
+
+  // Handle account select change (for dropdown)
+  const handleAccountSelectChange = () => {
+    page.value = 1
+    loadLogs()
+  }
+
+  // Load logs
+  const loadLogs = async () => {
+    if (!selectedAccountId.value) return
+
+    loading.value = true
+    try {
+      const response = await queryOperationLogs({
+        accountId: selectedAccountId.value,
+        operationType: filterType.value || undefined,
+        operationModule: filterModule.value || undefined,
+        operationStatus: filterStatus.value !== '' ? Number(filterStatus.value) : undefined,
+        page: page.value,
+        pageSize: pageSize.value
+      })
+
+      if (response.code === 0 || response.code === 200) {
+        logs.value = response.data?.logs || []
+        total.value = response.data?.total || 0
+      } else {
+        throw new Error(response.msg || '加载失败')
+      }
+    } catch (error: any) {
+      console.error('加载操作记录失败:', error)
+      // 只有在错误消息未显示过时才弹出提示（避免重复显示）
+      if (!error.messageShown) {
+        showError('加载失败: ' + error.message)
+      }
+    } finally {
+      loading.value = false
+    }
+  }
+
+  // Filter
+  const handleFilter = () => {
+    page.value = 1
+    loadLogs()
+  }
+
+  // Reset filter
+  const handleResetFilter = () => {
+    filterType.value = ''
+    filterModule.value = ''
+    filterStatus.value = ''
+    page.value = 1
+    loadLogs()
+  }
+
+  // Page change
+  const handlePageChange = (newPage: number) => {
+    page.value = newPage
+    loadLogs()
+  }
+
+  // Refresh
+  const handleRefresh = () => {
+    loadLogs()
+    showInfo('已刷新')
+  }
+
+  // Delete old logs - open dialog
+  const openDeleteDialog = () => {
+    deleteDays.value = ''
+    deleteDialogVisible.value = true
+  }
+
+  // Confirm delete old logs
+  const confirmDeleteOld = async () => {
+    const days = parseInt(deleteDays.value)
+    if (isNaN(days) || days <= 0) {
+      showError('请输入有效的天数')
+      return
+    }
+
+    try {
+      const response = await deleteOldLogs(days)
+      if (response.code === 0 || response.code === 200) {
+        showSuccess(`成功删除${response.data}条记录`)
+        deleteDialogVisible.value = false
+        loadLogs()
+      } else {
+        throw new Error(response.msg || '删除失败')
+      }
+    } catch (error: any) {
+      console.error('删除旧日志失败:', error)
+      // 只有在错误消息未显示过时才弹出提示（避免重复显示）
+      if (!error.messageShown) {
+        showError('删除失败: ' + error.message)
+      }
+    }
+  }
+
+  // 清空当前账号的全部操作记录
+  const handleClearLogs = async () => {
+    if (!selectedAccountId.value || clearingLogs.value) return
+
+    try {
+      await showConfirm('确定清空当前账号的全部操作记录吗？此操作无法恢复。', '清空操作记录')
+    } catch {
+      return
+    }
+
+    clearingLogs.value = true
+    try {
+      const response = await clearOperationLogs(selectedAccountId.value)
+      if (response.code === 0 || response.code === 200) {
+        const deleted = response.data ?? 0
+        showSuccess(`已清空 ${deleted} 条操作记录`)
+        page.value = 1
+        await loadLogs()
+      } else {
+        throw new Error(response.msg || '删除失败')
+      }
+    } catch (error: any) {
+      console.error('删除操作记录失败:', error)
+      if (!error.messageShown) {
+        showError('删除失败: ' + error.message)
+      }
+    } finally {
+      clearingLogs.value = false
+    }
+  }
+
+  // Lifecycle
+  onMounted(() => {
+    loadAccounts()
+    checkScreenSize()
+    window.addEventListener('resize', checkScreenSize)
+  })
+
+  onUnmounted(() => {
+    window.removeEventListener('resize', checkScreenSize)
+  })
+
+  return {
+    // State
+    loading,
+    accounts,
+    selectedAccountId,
+    logs,
+    total,
+    page,
+    pageSize,
+    totalPages,
+    filterType,
+    filterModule,
+    filterStatus,
+    isMobile,
+    mobileView,
+    selectedAccountForMobile,
+    deleteDialogVisible,
+    deleteDays,
+    clearingLogs,
+    currentAccount,
+
+    // Constants
+    operationTypes,
+    operationModules,
+    operationStatuses,
+
+    // Methods
+    selectAccount,
+    handleAccountSelectChange,
+    loadLogs,
+    handleFilter,
+    handleResetFilter,
+    handlePageChange,
+    handleRefresh,
+    openDeleteDialog,
+    confirmDeleteOld,
+    handleClearLogs,
+    goBackToAccounts,
+    getAccountAvatar,
+    getAccountName,
+    getLogAccountName,
+    getLogAccountUnb,
+    getOperationTypeText,
+    getOperationTypeClass,
+    getStatusText,
+    getStatusClass,
+    formatTime,
+    formatDuration,
+    checkScreenSize
+  }
+}

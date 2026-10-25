@@ -1,0 +1,10 @@
+[Unit]
+Description=Watch YuZhanggui online update requests
+After=docker.service
+
+[Path]
+PathExists=@UPDATE_DIR@/request.json
+Unit=yuzhanggui-update.service
+
+[Install]
+WantedBy=multi-user.target

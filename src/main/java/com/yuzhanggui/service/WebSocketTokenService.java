@@ -1,0 +1,76 @@
+package com.yuzhanggui.service;
+
+/**
+ * WebSocket Token服务接口
+ * 用于获取WebSocket连接所需的accessToken
+ */
+public interface WebSocketTokenService {
+    
+    /**
+     * 获取accessToken
+     * 参考Python的refresh_token方法
+     * 内部会自动从数据库读取最新的Cookie和deviceId
+     *
+     * @param accountId 账号ID
+     * @return accessToken，失败返回null
+     */
+    String getAccessToken(Long accountId);
+    
+    /**
+     * 保存Token到数据库
+     * 
+     * @param accountId 账号ID
+     * @param token accessToken
+     */
+    void saveToken(Long accountId, String token);
+    
+    /**
+     * 清除Token缓存（强制刷新）
+     * 
+     * @param accountId 账号ID
+     */
+    void clearToken(Long accountId);
+    
+    /**
+     * 清除验证等待状态
+     */
+    void clearCaptchaWait(Long accountId);
+
+    /**
+     * Cancel every in-memory credential renewal task and remove transient state
+     * for one account. This does not delete the persisted Token.
+     */
+    void clearAccountRuntimeState(Long accountId);
+
+    /** Returns the persisted WebSocket Token expiry time in milliseconds. */
+    Long getTokenExpireTime(Long accountId);
+
+    /** Returns true while this account is waiting for a user security check. */
+    boolean isCaptchaPending(Long accountId);
+
+    /** Pause every automatic platform request for an account until credentials are updated. */
+    void pauseForVerification(Long accountId, String captchaUrl, String reason);
+
+    /** Returns the latest platform verification URL for this account. */
+    String getCaptchaUrl(Long accountId);
+
+    /** Returns true while a session-expiry renewal is intentionally delayed. */
+    boolean isSessionRenewalPending(Long accountId);
+
+    /** Current per-account renewal step shown in account details. */
+    RenewalStatus getRenewalStatus(Long accountId);
+
+    record RenewalStatus(String state, String message, Long updatedAt, Long nextRetryAt) {
+        public static RenewalStatus idle() {
+            return new RenewalStatus("IDLE", "等待下次自动续期", null, null);
+        }
+    }
+    
+    /**
+     * 刷新WebSocket token
+     * 
+     * @param accountId 账号ID
+     * @return 新的token，失败返回null
+     */
+    String refreshToken(Long accountId);
+}

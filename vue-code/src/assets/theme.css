@@ -1,0 +1,228 @@
+:root {
+  --xy-navy-950: #081b31;
+  --xy-navy-900: #0d2745;
+  --xy-navy-800: #15395f;
+  --xy-blue: #287df0;
+  --xy-blue-soft: #eaf3ff;
+  --xy-page: #f6f7fb;
+  --xy-surface: #ffffff;
+  --xy-surface-muted: #fcfbf8;
+  --xy-ink: #1f3556;
+  --xy-text: #34445e;
+  --xy-muted: #748198;
+  --xy-border: #e5e4df;
+  --xy-border-soft: #efeee9;
+  --xy-amber: #FFDA44;
+  --xy-amber-deep: #765600;
+  --xy-amber-soft: #FFF7CF;
+  --xy-success: #1a9b68;
+  --xy-success-soft: #eaf8f1;
+  --xy-warning: #c47a00;
+  --xy-warning-soft: #fff6df;
+  --xy-danger: #d64b43;
+  --xy-danger-soft: #fff0ef;
+  --xy-info: #2d6fce;
+  --xy-info-soft: #edf4ff;
+
+  --ab: var(--xy-amber);
+  --ar: var(--xy-danger);
+  --ag: var(--xy-success);
+  --ao: var(--xy-warning);
+  --ap: #6b5bc9;
+  --apple-gray: var(--xy-muted);
+  --glass-bg: var(--xy-surface);
+  --glass-bg-deep: var(--xy-surface-muted);
+  --glass-bg-float: var(--xy-surface);
+  --glass-border: var(--xy-border);
+  --glass-border-in: var(--xy-border-soft);
+  --glass-shadow: none;
+  --glass-shadow-float: 0 16px 36px rgba(27, 47, 77, .12);
+  --glass-blur: none;
+  --glass-blur-sm: none;
+  --bg-gradient: var(--xy-page);
+  --apple-text: var(--xy-ink);
+  --apple-text2: var(--xy-muted);
+  --apple-sep: var(--xy-border);
+  --r: 10px;
+  --r-sm: 8px;
+  --r-pill: 999px;
+  --r-lg: 14px;
+
+  --color-background: var(--xy-page);
+  --color-background-soft: var(--xy-surface);
+  --color-background-mute: var(--xy-surface-muted);
+  --color-border: var(--xy-border);
+  --color-border-hover: #b8b8b0;
+  --color-heading: var(--xy-ink);
+  --color-text: var(--xy-text);
+  --color-primary: var(--xy-amber);
+  --color-primary-hover: #e4a600;
+  --color-success: var(--xy-success);
+  --color-warning: var(--xy-warning);
+  --color-danger: var(--xy-danger);
+  --color-info: var(--xy-info);
+
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+  color-scheme: light;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+html, body, #app { min-width: 320px; min-height: 100%; margin: 0; }
+body { background: var(--xy-page); color: var(--xy-text); }
+button, input, select, textarea { font: inherit; }
+button { -webkit-tap-highlight-color: transparent; }
+
+button:focus-visible, a:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible {
+  outline: 2px solid rgba(244, 180, 0, .85);
+  outline-offset: 2px;
+}
+
+a { color: var(--xy-info); text-decoration: none; }
+a:hover { color: #1d5caf; }
+
+.table-action-btn,
+.table-action-btn-danger {
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid var(--xy-border);
+  border-radius: 7px;
+  background: var(--xy-surface);
+  font-size: 12px;
+  font-weight: 600;
+}
+.table-action-btn { color: var(--xy-amber-deep); }
+.table-action-btn-danger { color: var(--xy-danger); }
+.table-action-btn:hover,
+.table-action-btn-danger:hover { background: var(--xy-surface-muted); border-color: #cbc8bd; }
+
+/*
+ * 统一操作按钮规范
+ *
+ * 卡券管理使用的圆角、清晰色阶作为全站标准。已有页面中常见的
+ * btn / button 命名会自动接入；新页面优先使用 .xy-button 与下方的
+ * 语义修饰类（--primary / --success / --warning / --danger）。
+ */
+.xy-button,
+button:is([class*="btn"], [class*="button"], .button):not(.drawer-close-btn):not(.menu-toggle-btn):not(.login-eye-btn):not(.settings__eye-btn):not(.chat-panel__image-button) {
+  min-height: 34px !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 6px !important;
+  padding: 7px 14px !important;
+  border: 1px solid #d8e0ec !important;
+  border-radius: 999px !important;
+  background: #ffffff !important;
+  color: #1570df !important;
+  font-size: 13px !important;
+  font-weight: 650 !important;
+  line-height: 1 !important;
+  white-space: nowrap !important;
+  cursor: pointer !important;
+  transition: transform .15s ease, background-color .15s ease, border-color .15s ease, color .15s ease !important;
+}
+
+.xy-button:hover:not(:disabled),
+button:is([class*="btn"], [class*="button"], .button):not(.drawer-close-btn):not(.menu-toggle-btn):not(.login-eye-btn):not(.settings__eye-btn):not(.chat-panel__image-button):hover:not(:disabled) {
+  transform: translateY(-1px) !important;
+  border-color: #91b8f1 !important;
+  background: #f5f9ff !important;
+}
+
+.xy-button:active:not(:disabled),
+button:is([class*="btn"], [class*="button"], .button):not(.drawer-close-btn):not(.menu-toggle-btn):not(.login-eye-btn):not(.settings__eye-btn):not(.chat-panel__image-button):active:not(:disabled) {
+  transform: translateY(0) scale(.98) !important;
+}
+
+.xy-button:disabled,
+button:is([class*="btn"], [class*="button"], .button):not(.drawer-close-btn):not(.menu-toggle-btn):not(.login-eye-btn):not(.settings__eye-btn):not(.chat-panel__image-button):disabled {
+  cursor: not-allowed !important;
+  opacity: .46 !important;
+  transform: none !important;
+}
+
+.xy-button--primary,
+.xy-button--primary:hover:not(:disabled),
+button:is(.btn-primary, .btn--primary, .button--primary, .login-btn, .add-btn, .btn-save, .send-btn, .batch-rate-button, .check-button, [class*="save"], [class*="import"], [class*="sync"], [class*="qr"]):not(:disabled) {
+  border-color: #1987ff !important;
+  background: #248dff !important;
+  color: #ffffff !important;
+}
+
+.xy-button--primary:hover:not(:disabled),
+button:is(.btn-primary, .btn--primary, .button--primary, .login-btn, .add-btn, .btn-save, .send-btn, .batch-rate-button, .check-button, [class*="save"], [class*="import"], [class*="sync"], [class*="qr"]):hover:not(:disabled) {
+  border-color: #0878ef !important;
+  background: #087ff8 !important;
+}
+
+.xy-button--success,
+.xy-button--success:hover:not(:disabled),
+button:is(.btn-success, [class*="success"], [class*="confirm"], [class*="export"], [class*="enable"]):not(:disabled) {
+  border-color: #32c875 !important;
+  background: #41cf7e !important;
+  color: #ffffff !important;
+}
+
+.xy-button--success:hover:not(:disabled),
+button:is(.btn-success, [class*="success"], [class*="confirm"], [class*="export"], [class*="enable"]):hover:not(:disabled) {
+  border-color: #23b966 !important;
+  background: #2fc56e !important;
+}
+
+.xy-button--warning,
+.xy-button--warning:hover:not(:disabled),
+button:is(.btn-warning, .retry-button, .batch-flower-button, [class*="warning"], [class*="reset"]):not(:disabled) {
+  border-color: #ffb124 !important;
+  background: #ffb52b !important;
+  color: #624000 !important;
+}
+
+.xy-button--warning:hover:not(:disabled),
+button:is(.btn-warning, .retry-button, .batch-flower-button, [class*="warning"], [class*="reset"]):hover:not(:disabled) {
+  border-color: #f3a10b !important;
+  background: #ffab13 !important;
+}
+
+.xy-button--danger,
+.xy-button--danger:hover:not(:disabled),
+button:is(.btn-danger, [class*="danger"], [class*="delete"], [class*="disable"], [class*="logout"]):not(:disabled) {
+  border-color: #ffb9b5 !important;
+  background: #fff2f1 !important;
+  color: #df514b !important;
+}
+
+.xy-button--danger:hover:not(:disabled),
+button:is(.btn-danger, [class*="danger"], [class*="delete"], [class*="disable"], [class*="logout"]):hover:not(:disabled) {
+  border-color: #ff928c !important;
+  background: #ffe8e6 !important;
+}
+
+/* 少量未命名的页面操作按钮也使用同一套次级按钮外观。 */
+button:not([class]):not([role="menuitem"]):not(.user-popover__logout) {
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 5px 11px;
+  border: 1px solid #d8e0ec;
+  border-radius: 999px;
+  background: #ffffff;
+  color: #1570df;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1;
+  cursor: pointer;
+}
+
+button:not([class]):not([role="menuitem"]):not(.user-popover__logout):hover:not(:disabled) {
+  border-color: #91b8f1;
+  background: #f5f9ff;
+}
+
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 99px; background: #cfcfc8; background-clip: padding-box; }
+::-webkit-scrollbar-thumb:hover { background: #b8b8b0; background-clip: padding-box; }

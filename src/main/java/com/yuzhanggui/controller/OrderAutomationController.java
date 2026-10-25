@@ -1,0 +1,85 @@
+package com.yuzhanggui.controller;
+
+import com.yuzhanggui.common.ResultObject;
+import com.yuzhanggui.controller.dto.OrderAutomationActionQueryReqDTO;
+import com.yuzhanggui.controller.dto.OrderAutomationAvailableActionsDTO;
+import com.yuzhanggui.controller.dto.OrderAutomationBatchReqDTO;
+import com.yuzhanggui.controller.dto.OrderAutomationBatchRespDTO;
+import com.yuzhanggui.controller.dto.OrderAutomationQueryReqDTO;
+import com.yuzhanggui.controller.dto.OrderAutomationRetryReqDTO;
+import com.yuzhanggui.controller.dto.OrderAutomationRetryRespDTO;
+import com.yuzhanggui.service.OrderAutomationService;
+import jakarta.validation.Valid;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.Map;
+
+/**
+ * 自动评价与小红花执行中心接口。
+ */
+@Slf4j
+@RestController
+@RequestMapping("/api/order-automation")
+public class OrderAutomationController {
+
+    private final OrderAutomationService orderAutomationService;
+
+    public OrderAutomationController(OrderAutomationService orderAutomationService) {
+        this.orderAutomationService = orderAutomationService;
+    }
+
+    @PostMapping("/query")
+    public ResultObject<Map<String, Object>> query(@RequestBody(required = false) OrderAutomationQueryReqDTO request) {
+        return ResultObject.success(orderAutomationService.query(
+                request == null ? new OrderAutomationQueryReqDTO() : request));
+    }
+
+    @PostMapping("/retry")
+    public ResultObject<OrderAutomationRetryRespDTO> retry(@Valid @RequestBody OrderAutomationRetryReqDTO request) {
+        OrderAutomationRetryRespDTO result = orderAutomationService.retry(
+                request.getAccountId(), request.getOrderId(), request.getAction());
+        if (result.isSuccess()) {
+            return ResultObject.success(result, result.getMessage());
+        }
+        log.warn("自动化执行中心手动重试失败：accountId={}, orderId={}, action={}, reason={}",
+                request.getAccountId(), request.getOrderId(), request.getAction(), result.getMessage());
+        return ResultObject.failed(result.getMessage());
+    }
+
+    /** 批量检查待评价资格，或对已进入待评价列表的订单批量评价。 */
+    @PostMapping("/batch-rate")
+    public ResultObject<OrderAutomationBatchRespDTO> batchRate(
+            @RequestBody(required = false) OrderAutomationBatchReqDTO request) {
+        OrderAutomationBatchReqDTO body = request == null ? new OrderAutomationBatchReqDTO() : request;
+        OrderAutomationBatchRespDTO result = orderAutomationService.batchRate(body.getAccountId(), body.getAction());
+        return result.getAccountCount() > 0
+                ? ResultObject.success(result, result.getMessage())
+                : ResultObject.failed(result.getMessage());
+    }
+
+    /** 对近 30 天已确认发货、尚未成功请求过小红花的订单批量请求小红花。 */
+    @PostMapping("/batch-red-flower")
+    public ResultObject<OrderAutomationBatchRespDTO> batchRedFlower(
+            @RequestBody(required = false) OrderAutomationBatchReqDTO request) {
+        OrderAutomationBatchReqDTO body = request == null ? new OrderAutomationBatchReqDTO() : request;
+        OrderAutomationBatchRespDTO result = orderAutomationService.batchRedFlower(body.getAccountId());
+        return result.getAccountCount() > 0
+                ? ResultObject.success(result, result.getMessage())
+                : ResultObject.failed(result.getMessage());
+    }
+
+    /**
+     * 订单管理打开“更多操作”时实时核验可补偿的动作。
+     * 评价会先向闲鱼待评价列表确认，避免展示已评价订单的重复操作。
+     */
+    @PostMapping("/actions")
+    public ResultObject<OrderAutomationAvailableActionsDTO> availableActions(
+            @Valid @RequestBody OrderAutomationActionQueryReqDTO request) {
+        return ResultObject.success(orderAutomationService.availableActions(
+                request.getAccountId(), request.getOrderId()));
+    }
+}

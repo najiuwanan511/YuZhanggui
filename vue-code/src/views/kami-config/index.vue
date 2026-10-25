@@ -1,0 +1,2800 @@
+<script setup lang="ts">
+import { ref, computed, onMounted, onUnmounted, inject, nextTick } from 'vue'
+import { toast } from '@/utils/toast'
+import { showConfirm } from '@/utils/confirm'
+import { getAccountList } from '@/api/account'
+import { uploadImage } from '@/api/image'
+import type { Account } from '@/types'
+import {
+  getKamiConfigs,
+  saveKamiConfig,
+  deleteKamiConfig,
+  queryKamiItems,
+  batchImportKamiItems,
+  deleteKamiItem,
+  clearUsedKamiItems,
+  batchDeleteKamiItems,
+  batchResetKamiItems,
+  resetKamiItem,
+  exportKamiItems,
+  testKamiApi,
+  getKamiRelatedGoods,
+  saveKamiRelatedGoods,
+  type KamiConfig,
+  type KamiItem,
+  type KamiRelatedGoods
+} from '@/api/kami-config'
+
+const kamiConfigs = ref<KamiConfig[]>([])
+const configLoading = ref(false)
+
+const selectedConfigId = ref<number | null>(null)
+const kamiItems = ref<KamiItem[]>([])
+const itemsLoading = ref(false)
+
+const showCreateDialog = ref(false)
+const createForm = ref({
+  aliasName: '',
+  sourceType: 1,
+  apiUrl: '',
+  apiMethod: 'POST' as 'GET' | 'POST',
+  apiHeaders: '',
+  apiRequestTemplate: '{\n  "orderId": "{{orderId}}",\n  "goodsId": "{{goodsId}}",\n  "quantity": "{{quantity}}"\n}',
+  apiResultPath: '',
+  apiTimeoutSeconds: 10
+})
+const createLoading = ref(false)
+
+const showApiDialog = ref(false)
+const apiSaving = ref(false)
+const apiTesting = ref(false)
+const apiTestResult = ref('')
+const deliveryImageInput = ref<HTMLInputElement | null>(null)
+const deliveryImageUploading = ref(false)
+const uploadAccounts = ref<Account[]>([])
+const deliveryImageUploadAccountIds = ref<number[]>([])
+const deliveryImageUploadProgress = ref({ completed: 0, total: 0 })
+const apiForm = ref({
+  aliasName: '',
+  sourceType: 2,
+  fixedContent: '',
+  deliveryTemplate: '',
+  deliveryImageUrl: '',
+  deliveryImageUrls: {} as Record<string, string>,
+  importContent: '',
+  apiUrl: '',
+  apiMethod: 'POST' as 'GET' | 'POST',
+  apiHeaders: '',
+  apiRequestTemplate: '{\n  "orderId": "{{orderId}}",\n  "goodsId": "{{goodsId}}",\n  "quantity": "{{quantity}}"\n}',
+  apiResultPath: '',
+  apiTimeoutSeconds: 10
+})
+const deliveryTemplateTextarea = ref<HTMLTextAreaElement | null>(null)
+const deliveryTemplateVariables = [
+  {
+    token: '{DELIVERY_CONTENT}',
+    name: '实际发货内容',
+    description: '本次取出的卡券、接口返回内容或固定发货内容',
+    required: true
+  },
+  { token: '{order_id}', name: '订单号', description: '当前闲鱼订单的订单号' },
+  { token: '{item_id}', name: '商品 ID', description: '当前成交商品的闲鱼商品 ID' },
+  { token: '{item_title}', name: '商品标题', description: '当前成交商品的标题' },
+  { token: '{buyer_name}', name: '买家昵称', description: '当前订单买家的昵称' },
+  { token: '{buyer_id}', name: '买家 ID', description: '当前订单买家的闲鱼用户 ID' },
+  { token: '{seller_name}', name: '卖家名称', description: '当前发货账号的备注；未设置时显示账号 UNB' },
+  { token: '{sku_name}', name: '商品规格', description: '买家下单时选择的规格；无规格时为空' }
+]
+const DELIVERY_MESSAGE_SEPARATOR = '######'
+
+const deliveryTemplateMessages = computed(() => {
+  const template = apiForm.value.deliveryTemplate.trim()
+  if (!template) return ['{DELIVERY_CONTENT}']
+  return template
+    .split(DELIVERY_MESSAGE_SEPARATOR)
+    .map(message => message.trim())
+})
+
+const deliveryMessageLabel = (index: number) => index === 0
+  ? '文字消息 1（卡密/发货内容）'
+  : `文字消息 ${index + 1}`
+
+const accountDisplayName = (account?: Account) =>
+  account?.accountNote || account?.unb || (account ? `账号 #${account.id}` : '未知账号')
+
+const uploadCapableAccounts = computed(() => uploadAccounts.value.filter(account => account.status === 1))
+const allUploadAccountsSelected = computed(() => uploadCapableAccounts.value.length > 0
+  && uploadCapableAccounts.value.every(account => deliveryImageUploadAccountIds.value.includes(account.id)))
+const configuredDeliveryImages = computed(() => Object.entries(apiForm.value.deliveryImageUrls)
+  .map(([accountId, imageUrl]) => {
+    const numericAccountId = Number(accountId)
+    return {
+      accountId: numericAccountId,
+      accountName: accountDisplayName(uploadAccounts.value.find(account => account.id === numericAccountId)),
+      imageUrl
+    }
+  })
+  .filter(item => Number.isFinite(item.accountId) && item.imageUrl)
+  .sort((left, right) => left.accountId - right.accountId))
+
+const toggleAllUploadAccounts = () => {
+  deliveryImageUploadAccountIds.value = allUploadAccountsSelected.value
+    ? []
+    : uploadCapableAccounts.value.map(account => account.id)
+}
+
+const removeAccountDeliveryImage = (accountId: number) => {
+  const next = { ...apiForm.value.deliveryImageUrls }
+  delete next[String(accountId)]
+  apiForm.value.deliveryImageUrls = next
+}
+
+const clearAllDeliveryImages = () => {
+  apiForm.value.deliveryImageUrl = ''
+  apiForm.value.deliveryImageUrls = {}
+}
+
+const insertDeliveryTemplateVariable = async (token: string) => {
+  const textarea = deliveryTemplateTextarea.value
+  const currentValue = apiForm.value.deliveryTemplate || ''
+  const start = textarea?.selectionStart ?? currentValue.length
+  const end = textarea?.selectionEnd ?? start
+
+  apiForm.value.deliveryTemplate = `${currentValue.slice(0, start)}${token}${currentValue.slice(end)}`
+  await nextTick()
+
+  const cursor = start + token.length
+  deliveryTemplateTextarea.value?.focus()
+  deliveryTemplateTextarea.value?.setSelectionRange(cursor, cursor)
+}
+
+const addDeliveryMessage = async () => {
+  const currentValue = apiForm.value.deliveryTemplate.trim()
+  const baseTemplate = currentValue || '{DELIVERY_CONTENT}'
+  apiForm.value.deliveryTemplate = `${baseTemplate}\n${DELIVERY_MESSAGE_SEPARATOR}\n`
+  await nextTick()
+  const textarea = deliveryTemplateTextarea.value
+  textarea?.focus()
+  textarea?.setSelectionRange(apiForm.value.deliveryTemplate.length, apiForm.value.deliveryTemplate.length)
+}
+
+const showRelatedGoodsDialog = ref(false)
+const relatedGoods = ref<KamiRelatedGoods[]>([])
+const relatedGoodsLoading = ref(false)
+const relatedGoodsSaving = ref(false)
+const relatedGoodsKeyword = ref('')
+const relatedGoodsAccountFilter = ref('all')
+const selectedRelatedGoodsKeys = ref<string[]>([])
+const initialRelatedGoodsKeys = ref<string[]>([])
+
+const showAlertDialog = ref(false)
+const alertForm = ref({
+  alertEnabled: 0,
+  alertThresholdType: 1,
+  alertThresholdValue: 10,
+  alertEmail: ''
+})
+const alertLoading = ref(false)
+
+const showExportDialog = ref(false)
+const exportStatus = ref<{ unused: boolean; used: boolean }>({ unused: true, used: true })
+
+const isMobile = ref(false)
+const rulesExpanded = ref(false)
+
+const filterStatus = ref<number | undefined>(undefined)
+const filterKeyword = ref('')
+const clearingUsedItems = ref(false)
+const batchKamiActionLoading = ref(false)
+const selectedKamiItemIds = ref<number[]>([])
+
+const checkScreenSize = () => {
+  isMobile.value = window.innerWidth < 768
+}
+
+// 卡券库不再属于单个账号，进入页面时清除其他页面遗留的账号筛选器。
+const setHeaderContent = inject<(content: any) => void>('setHeaderContent')
+
+const selectedConfig = computed(() => {
+  return kamiConfigs.value.find(c => c.id === selectedConfigId.value)
+})
+
+const isApiSource = computed(() => selectedConfig.value?.sourceType === 2)
+const isFixedSource = computed(() => selectedConfig.value?.sourceType === 3)
+const isLocalSource = computed(() => selectedConfig.value?.sourceType !== 2 && selectedConfig.value?.sourceType !== 3)
+
+const sourceLabel = (sourceType?: number) => {
+  if (sourceType === 2) return '外部 API'
+  if (sourceType === 3) return '固定内容'
+  return '本地库存'
+}
+
+const kamiStatusLabel = (status: number) => {
+  if (status === 0) return '未使用'
+  if (status === 1) return '已使用'
+  if (status === 2) return '发货处理中'
+  if (status === 3) return '待核对'
+  return '未知状态'
+}
+
+const canDeleteKamiItem = (item: KamiItem) => item.status === 0 || item.status === 1 || item.status === 3
+const canResetKamiItem = (item: KamiItem) => item.status === 1 || item.status === 3
+const selectedKamiItems = computed(() => {
+  const selected = new Set(selectedKamiItemIds.value)
+  return kamiItems.value.filter(item => selected.has(item.id))
+})
+
+const selectedKamiDeleteCount = computed(() => selectedKamiItems.value.filter(canDeleteKamiItem).length)
+const selectedKamiResetCount = computed(() => selectedKamiItems.value.filter(canResetKamiItem).length)
+const selectableKamiItems = computed(() => kamiItems.value.filter(canDeleteKamiItem))
+const allVisibleKamiItemsSelected = computed(() => selectableKamiItems.value.length > 0
+  && selectableKamiItems.value.every(item => selectedKamiItemIds.value.includes(item.id)))
+
+const toggleVisibleKamiItems = () => {
+  const visibleIds = selectableKamiItems.value.map(item => item.id)
+  const selected = new Set(selectedKamiItemIds.value)
+  if (allVisibleKamiItemsSelected.value) {
+    visibleIds.forEach(id => selected.delete(id))
+  } else {
+    visibleIds.forEach(id => selected.add(id))
+  }
+  selectedKamiItemIds.value = Array.from(selected)
+}
+
+const relatedGoodsKey = (goods: Pick<KamiRelatedGoods, 'xianyuAccountId' | 'xyGoodsId'>) =>
+  `${goods.xianyuAccountId}:${goods.xyGoodsId}`
+
+const relatedGoodsAccounts = computed(() => {
+  const accounts = new Map<number, string>()
+  relatedGoods.value.forEach(goods => {
+    accounts.set(goods.xianyuAccountId, goods.accountNote || `账号 ${goods.xianyuAccountId}`)
+  })
+  return Array.from(accounts, ([id, name]) => ({ id, name }))
+    .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'))
+})
+
+const filteredRelatedGoods = computed(() => {
+  const keyword = relatedGoodsKeyword.value.trim().toLowerCase()
+  return relatedGoods.value.filter(goods => {
+    const accountMatched = relatedGoodsAccountFilter.value === 'all'
+      || String(goods.xianyuAccountId) === relatedGoodsAccountFilter.value
+    const keywordMatched = !keyword
+      || [goods.goodsTitle, goods.xyGoodsId, goods.accountNote].some(value => value?.toLowerCase().includes(keyword))
+    return accountMatched && keywordMatched
+  })
+})
+
+const selectedRelatedGoods = computed(() => {
+  const selected = new Set(selectedRelatedGoodsKeys.value)
+  return relatedGoods.value.filter(goods => selected.has(relatedGoodsKey(goods)))
+})
+
+const relatedGoodsDirty = computed(() => {
+  const current = [...selectedRelatedGoodsKeys.value].sort()
+  const initial = [...initialRelatedGoodsKeys.value].sort()
+  return current.length !== initial.length || current.some((key, index) => key !== initial[index])
+})
+
+const allFilteredRelatedGoodsSelected = computed(() => filteredRelatedGoods.value.length > 0
+  && filteredRelatedGoods.value.every(goods => selectedRelatedGoodsKeys.value.includes(relatedGoodsKey(goods))))
+
+const toggleFilteredRelatedGoods = () => {
+  const visibleKeys = filteredRelatedGoods.value.map(relatedGoodsKey)
+  const selected = new Set(selectedRelatedGoodsKeys.value)
+  if (allFilteredRelatedGoodsSelected.value) {
+    visibleKeys.forEach(key => selected.delete(key))
+  } else {
+    visibleKeys.forEach(key => selected.add(key))
+  }
+  selectedRelatedGoodsKeys.value = Array.from(selected)
+}
+
+const clearRelatedGoodsSelection = () => {
+  selectedRelatedGoodsKeys.value = []
+}
+
+const contentPreview = (content?: string) => {
+  const normalized = (content || '').replace(/\s+/g, ' ').trim()
+  return normalized.length > 48 ? `${normalized.slice(0, 48)}…` : normalized || '尚未配置内容'
+}
+
+const loadKamiConfigs = async () => {
+  configLoading.value = true
+  try {
+    const res = await getKamiConfigs()
+    if (res.code === 200) {
+      kamiConfigs.value = res.data || []
+      if (kamiConfigs.value.length > 0 && !selectedConfigId.value && !isMobile.value) {
+        selectedConfigId.value = kamiConfigs.value[0]!.id
+        if (kamiConfigs.value[0]!.sourceType === 1 || !kamiConfigs.value[0]!.sourceType) loadKamiItems()
+      } else if (kamiConfigs.value.length === 0) {
+        selectedConfigId.value = null
+        kamiItems.value = []
+      }
+    }
+  } catch (e) {
+    console.error('加载卡券库失败', e)
+  } finally {
+    configLoading.value = false
+  }
+}
+
+const loadUploadAccounts = async () => {
+  try {
+    const response = await getAccountList()
+    uploadAccounts.value = response.data?.accounts || []
+    const availableIds = new Set(uploadCapableAccounts.value.map(account => account.id))
+    deliveryImageUploadAccountIds.value = deliveryImageUploadAccountIds.value.filter(id => availableIds.has(id))
+    if (deliveryImageUploadAccountIds.value.length === 0 && uploadCapableAccounts.value[0]) {
+      deliveryImageUploadAccountIds.value = [uploadCapableAccounts.value[0].id]
+    }
+  } catch (error) {
+    console.error('加载图片上传账号失败', error)
+  }
+}
+
+const loadKamiItems = async () => {
+  selectedKamiItemIds.value = []
+  if (!selectedConfigId.value || !isLocalSource.value) {
+    kamiItems.value = []
+    return
+  }
+  itemsLoading.value = true
+  try {
+    const res = await queryKamiItems({
+      kamiConfigId: selectedConfigId.value,
+      status: filterStatus.value,
+      keyword: filterKeyword.value || undefined
+    })
+    if (res.code === 200) {
+      kamiItems.value = res.data || []
+    }
+  } catch (e) {
+    console.error('加载卡券列表失败', e)
+  } finally {
+    itemsLoading.value = false
+  }
+}
+
+const selectConfig = (config: KamiConfig) => {
+  selectedConfigId.value = config.id
+  selectedKamiItemIds.value = []
+  filterStatus.value = undefined
+  filterKeyword.value = ''
+  if (config.sourceType !== 1) {
+    kamiItems.value = []
+  } else {
+    loadKamiItems()
+  }
+}
+
+const handleCreate = async () => {
+  createLoading.value = true
+  try {
+    const requestedSource = createForm.value.sourceType
+    const deferredSource = requestedSource !== 1
+    const res = await saveKamiConfig({
+      aliasName: createForm.value.aliasName || '未命名',
+      // 固定内容和外部 API 都需在下一步填写必填配置，因此先建立空的本地库。
+      sourceType: deferredSource ? 1 : createForm.value.sourceType
+    })
+    if (res.code === 200) {
+      toast.success('创建成功')
+      showCreateDialog.value = false
+      createForm.value = {
+        aliasName: '', sourceType: 1, apiUrl: '', apiMethod: 'POST', apiHeaders: '',
+        apiRequestTemplate: '{\n  "orderId": "{{orderId}}",\n  "goodsId": "{{goodsId}}",\n  "quantity": "{{quantity}}"\n}',
+        apiResultPath: '', apiTimeoutSeconds: 10
+      }
+      await loadKamiConfigs()
+      if (res.data?.id) {
+        selectedConfigId.value = res.data.id
+        if (deferredSource) {
+          apiForm.value = {
+            aliasName: res.data.aliasName || createForm.value.aliasName || '未命名',
+            sourceType: requestedSource,
+            fixedContent: '',
+            deliveryTemplate: '',
+            deliveryImageUrl: '',
+            deliveryImageUrls: {},
+            importContent: '',
+            apiUrl: '',
+            apiMethod: 'POST',
+            apiHeaders: '',
+            apiRequestTemplate: '{\n  "orderId": "{{orderId}}",\n  "goodsId": "{{goodsId}}",\n  "quantity": "{{quantity}}"\n}',
+            apiResultPath: '',
+            apiTimeoutSeconds: 10
+          }
+          void loadUploadAccounts()
+          showApiDialog.value = true
+        } else {
+          loadKamiItems()
+        }
+      }
+    } else {
+      toast.error(res.msg || '创建失败')
+    }
+  } catch (e) {
+    toast.error('创建失败')
+  } finally {
+    createLoading.value = false
+  }
+}
+
+const openApiDialog = () => {
+  if (!selectedConfig.value) return
+  void loadUploadAccounts()
+  const config = selectedConfig.value
+  apiForm.value = {
+    aliasName: config.aliasName || '',
+    sourceType: config.sourceType || 1,
+    fixedContent: config.fixedContent || '',
+    deliveryTemplate: config.deliveryTemplate || '',
+    deliveryImageUrl: config.deliveryImageUrl || '',
+    deliveryImageUrls: { ...(config.deliveryImageUrls || {}) },
+    importContent: '',
+    apiUrl: config.apiUrl || '',
+    apiMethod: (config.apiMethod === 'GET' ? 'GET' : 'POST'),
+    apiHeaders: config.apiHeaders || '',
+    apiRequestTemplate: config.apiRequestTemplate || '{\n  "orderId": "{{orderId}}",\n  "goodsId": "{{goodsId}}",\n  "quantity": "{{quantity}}"\n}',
+    apiResultPath: config.apiResultPath || '',
+    apiTimeoutSeconds: config.apiTimeoutSeconds || 10
+  }
+  deliveryImageUploadAccountIds.value = Object.keys(config.deliveryImageUrls || {})
+    .map(Number)
+    .filter(Number.isFinite)
+  apiTestResult.value = ''
+  showApiDialog.value = true
+}
+
+const chooseDeliveryImage = () => deliveryImageInput.value?.click()
+
+const uploadDeliveryImage = async (event: Event) => {
+  const input = event.target as HTMLInputElement
+  const file = input.files?.[0]
+  if (!file) return
+  const selectedIds = deliveryImageUploadAccountIds.value.filter(id =>
+    uploadCapableAccounts.value.some(account => account.id === id))
+  if (selectedIds.length === 0) {
+    toast.warning('请至少选择一个用于上传图片的闲鱼账号')
+    input.value = ''
+    return
+  }
+  if (!file.type.startsWith('image/')) {
+    toast.warning('请选择图片文件')
+    input.value = ''
+    return
+  }
+  if (file.size > 10 * 1024 * 1024) {
+    toast.warning('图片不能超过 10MB')
+    input.value = ''
+    return
+  }
+  deliveryImageUploading.value = true
+  deliveryImageUploadProgress.value = { completed: 0, total: selectedIds.length }
+  const nextImages = { ...apiForm.value.deliveryImageUrls }
+  const succeeded: string[] = []
+  const failed: string[] = []
+  try {
+    for (const accountId of selectedIds) {
+      const account = uploadAccounts.value.find(item => item.id === accountId)
+      try {
+        const response = await uploadImage(accountId, file)
+        if ((response.code === 0 || response.code === 200) && response.data) {
+          nextImages[String(accountId)] = response.data
+          succeeded.push(accountDisplayName(account))
+        } else {
+          failed.push(`${accountDisplayName(account)}：${response.msg || '上传失败'}`)
+        }
+      } catch (error) {
+        failed.push(`${accountDisplayName(account)}：${error instanceof Error ? error.message : '上传失败'}`)
+      } finally {
+        deliveryImageUploadProgress.value.completed += 1
+      }
+    }
+    if (succeeded.length > 0) {
+      apiForm.value.deliveryImageUrls = nextImages
+      apiForm.value.deliveryImageUrl = ''
+    }
+    if (failed.length === 0) {
+      toast.success(`已为 ${succeeded.length} 个账号上传发货图片`)
+    } else if (succeeded.length > 0) {
+      toast.warning(`成功 ${succeeded.length} 个，失败 ${failed.length} 个：${failed.join('；')}`)
+    } else {
+      toast.error(failed.join('；'))
+    }
+  } finally {
+    deliveryImageUploading.value = false
+    deliveryImageUploadProgress.value = { completed: 0, total: 0 }
+    input.value = ''
+  }
+}
+
+const handleTestApi = async () => {
+  if (apiForm.value.sourceType !== 2) {
+    toast.warning('请先选择“外部 API 自动取卡”')
+    return
+  }
+  apiTesting.value = true
+  apiTestResult.value = ''
+  try {
+    const res = await testKamiApi(apiForm.value)
+    if (res.code === 200) {
+      apiTestResult.value = `成功（HTTP ${res.data?.statusCode || 200}）：${res.data?.content || '未返回内容'}`
+      toast.success('接口测试成功')
+    } else {
+      apiTestResult.value = `失败：${res.msg || '接口测试失败'}`
+      toast.error(res.msg || '接口测试失败')
+    }
+  } catch (e) {
+    apiTestResult.value = '失败：请求未完成，请检查接口地址和网络。'
+    toast.error('接口测试失败')
+  } finally {
+    apiTesting.value = false
+  }
+}
+
+const handleSaveApi = async () => {
+  if (!selectedConfig.value) return
+  if (!apiForm.value.aliasName.trim()) {
+    toast.warning('请输入卡券库名称')
+    return
+  }
+  if (apiForm.value.deliveryTemplate.trim()
+      && !apiForm.value.deliveryTemplate.includes('{DELIVERY_CONTENT}')
+      && !apiForm.value.deliveryTemplate.includes('{kmKey}')) {
+    toast.warning('发货消息模板必须包含 {DELIVERY_CONTENT} 变量')
+    return
+  }
+  if (apiForm.value.sourceType !== selectedConfig.value.sourceType) {
+    try {
+      await showConfirm(
+        `确定将来源从“${sourceLabel(selectedConfig.value.sourceType)}”切换为“${sourceLabel(apiForm.value.sourceType)}”吗？现有使用记录会保留。`,
+        '切换卡券来源'
+      )
+    } catch {
+      return
+    }
+  }
+  apiSaving.value = true
+  let configSaved = false
+  try {
+    const res = await saveKamiConfig({
+      id: selectedConfig.value.id,
+      aliasName: apiForm.value.aliasName.trim(),
+      sourceType: apiForm.value.sourceType,
+      deliveryTemplate: apiForm.value.deliveryTemplate.trim(),
+      deliveryImageUrl: apiForm.value.deliveryImageUrl.trim(),
+      deliveryImageUrls: apiForm.value.deliveryImageUrls,
+      ...(apiForm.value.sourceType === 3 ? {
+        fixedContent: apiForm.value.fixedContent
+      } : {}),
+      ...(apiForm.value.sourceType === 2 ? {
+        apiUrl: apiForm.value.apiUrl,
+        apiMethod: apiForm.value.apiMethod,
+        apiHeaders: apiForm.value.apiHeaders,
+        apiRequestTemplate: apiForm.value.apiRequestTemplate,
+        apiResultPath: apiForm.value.apiResultPath,
+        apiTimeoutSeconds: apiForm.value.apiTimeoutSeconds
+      } : {})
+    })
+    if (res.code === 200) {
+      configSaved = true
+      if (apiForm.value.sourceType === 1 && apiForm.value.importContent.trim()) {
+        const importRes = await batchImportKamiItems({
+          kamiConfigId: selectedConfig.value.id,
+          kamiContents: apiForm.value.importContent
+        })
+        if (importRes.code !== 200) {
+          toast.error(`卡券库配置已保存，但卡券导入失败：${importRes.msg || '未知错误'}`)
+          await loadKamiConfigs()
+          loadKamiItems()
+          return
+        }
+        toast.success(importRes.msg || '卡券库配置和卡券内容已保存')
+      } else {
+        toast.success(`${sourceLabel(apiForm.value.sourceType)}卡券配置已保存`)
+      }
+      showApiDialog.value = false
+      kamiItems.value = []
+      await loadKamiConfigs()
+      if (apiForm.value.sourceType === 1) loadKamiItems()
+    } else {
+      toast.error(res.msg || '保存失败')
+    }
+  } catch (e) {
+    toast.error(configSaved ? '卡券库配置已保存，但卡券导入请求失败，请重试导入' : '保存失败')
+    if (configSaved) {
+      await loadKamiConfigs()
+      if (apiForm.value.sourceType === 1) loadKamiItems()
+    }
+  } finally {
+    apiSaving.value = false
+  }
+}
+
+const openRelatedGoodsDialog = async () => {
+  if (!selectedConfig.value) return
+  showRelatedGoodsDialog.value = true
+  relatedGoodsLoading.value = true
+  relatedGoods.value = []
+  relatedGoodsKeyword.value = ''
+  relatedGoodsAccountFilter.value = 'all'
+  selectedRelatedGoodsKeys.value = []
+  initialRelatedGoodsKeys.value = []
+  try {
+    const res = await getKamiRelatedGoods(selectedConfig.value.id)
+    if (res.code === 200) {
+      relatedGoods.value = res.data || []
+      selectedRelatedGoodsKeys.value = relatedGoods.value
+        .filter(goods => goods.associated)
+        .map(goods => relatedGoodsKey(goods))
+      initialRelatedGoodsKeys.value = [...selectedRelatedGoodsKeys.value]
+    } else {
+      toast.error(res.msg || '加载关联商品失败')
+    }
+  } catch (e) {
+    toast.error('加载关联商品失败')
+  } finally {
+    relatedGoodsLoading.value = false
+  }
+}
+
+const removeRelatedGoods = (goods: KamiRelatedGoods) => {
+  const key = relatedGoodsKey(goods)
+  selectedRelatedGoodsKeys.value = selectedRelatedGoodsKeys.value.filter(item => item !== key)
+}
+
+const handleSaveRelatedGoods = async () => {
+  if (!selectedConfig.value) return
+  relatedGoodsSaving.value = true
+  try {
+    const res = await saveKamiRelatedGoods({
+      kamiConfigId: selectedConfig.value.id,
+      goods: selectedRelatedGoods.value
+    })
+    if (res.code === 200) {
+      toast.success(res.msg || '关联商品已保存')
+      showRelatedGoodsDialog.value = false
+      await loadKamiConfigs()
+    } else {
+      toast.error(res.msg || '保存关联商品失败')
+    }
+  } catch (e) {
+    toast.error('保存关联商品失败')
+  } finally {
+    relatedGoodsSaving.value = false
+  }
+}
+
+const handleDeleteConfig = async (config: KamiConfig) => {
+  try {
+    await showConfirm(
+      `确定删除卡券库「${config.aliasName || config.id}」及其所有卡券？`,
+      '删除确认'
+    )
+    const res = await deleteKamiConfig(config.id)
+    if (res.code === 200) {
+      toast.success('删除成功')
+      if (selectedConfigId.value === config.id) {
+        selectedConfigId.value = null
+        kamiItems.value = []
+      }
+      loadKamiConfigs()
+    } else {
+      toast.error(res.msg || '删除失败')
+    }
+  } catch {}
+}
+
+const handleDeleteItem = async (item: KamiItem) => {
+  if (!canDeleteKamiItem(item)) {
+    toast.warning('发货处理中的卡券暂时不能删除')
+    return
+  }
+  try {
+    const reviewWarning = item.status === 3 ? '该卡券处于待核对状态，删除后将失去本地追踪记录。' : ''
+    await showConfirm(`确定删除该卡券？${reviewWarning}`, '删除确认')
+    const res = await deleteKamiItem(item.id)
+    if (res.code === 200) {
+      toast.success('删除成功')
+      loadKamiItems()
+      loadKamiConfigs()
+    } else {
+      toast.error(res.msg || '删除失败')
+    }
+  } catch {}
+}
+
+const handleBatchDeleteKamiItems = async () => {
+  const ids = selectedKamiItems.value.filter(canDeleteKamiItem).map(item => item.id)
+  if (!ids.length) {
+    toast.info('请先勾选可删除的卡券')
+    return
+  }
+  const reviewCount = selectedKamiItems.value.filter(item => item.status === 3).length
+  try {
+    await showConfirm(
+      `将永久删除所选 ${ids.length} 张卡券。${reviewCount ? `其中 ${reviewCount} 张为待核对卡券，删除后将失去本地追踪记录。` : ''}发货处理中的卡券不会被删除。`,
+      '二次确认：删除所选卡券'
+    )
+    batchKamiActionLoading.value = true
+    const res = await batchDeleteKamiItems(ids)
+    if (res.code === 200) {
+      toast.success(`已删除 ${res.data || 0} 张卡券`)
+      await loadKamiConfigs()
+      await loadKamiItems()
+    } else {
+      toast.error(res.msg || '批量删除失败')
+    }
+  } catch {
+    // User cancellation intentionally has no feedback.
+  } finally {
+    batchKamiActionLoading.value = false
+  }
+}
+
+const handleBatchResetKamiItems = async () => {
+  const ids = selectedKamiItems.value.filter(canResetKamiItem).map(item => item.id)
+  if (!ids.length) {
+    toast.info('请先勾选已使用或待核对的卡券')
+    return
+  }
+  const reviewCount = selectedKamiItems.value.filter(item => item.status === 3).length
+  try {
+    await showConfirm(
+      `将把所选 ${ids.length} 张卡券重置为未使用。${reviewCount ? `其中 ${reviewCount} 张为待核对卡券，重置后可能造成重复发放。` : ''}`,
+      '二次确认：重置所选卡券'
+    )
+    batchKamiActionLoading.value = true
+    const res = await batchResetKamiItems(ids)
+    if (res.code === 200) {
+      toast.success(`已重置 ${res.data || 0} 张卡券`)
+      await loadKamiConfigs()
+      await loadKamiItems()
+    } else {
+      toast.error(res.msg || '批量重置失败')
+    }
+  } catch {
+    // User cancellation intentionally has no feedback.
+  } finally {
+    batchKamiActionLoading.value = false
+  }
+}
+const handleClearUsedItems = async () => {
+  const config = selectedConfig.value
+  if (!config || !isLocalSource.value) return
+
+  const usedCount = config.usedCount || 0
+  if (usedCount === 0) {
+    toast.info('\u5f53\u524d\u5361\u5238\u5e93\u6ca1\u6709\u5df2\u4f7f\u7528\u7684\u5361\u5bc6')
+    return
+  }
+
+  try {
+    await showConfirm(
+      `\u5c06\u6c38\u4e45\u5220\u9664\u5f53\u524d\u5361\u5238\u5e93\u4e2d\u7684 ${usedCount} \u6761\u5df2\u4f7f\u7528\u5361\u5bc6\u3002\u672a\u4f7f\u7528\u3001\u53d1\u8d27\u5904\u7406\u4e2d\u548c\u5f85\u6838\u5bf9\u7684\u5361\u5bc6\u4e0d\u4f1a\u53d7\u5230\u5f71\u54cd\u3002\u5220\u9664\u540e\u65e0\u6cd5\u6062\u590d\u3002`,
+      '\u4e8c\u6b21\u786e\u8ba4\uff1a\u6e05\u7406\u5df2\u4f7f\u7528\u5361\u5bc6'
+    )
+    clearingUsedItems.value = true
+    const res = await clearUsedKamiItems(config.id)
+    if (res.code === 200) {
+      toast.success(`\u5df2\u6e05\u7406 ${res.data || 0} \u6761\u5df2\u4f7f\u7528\u5361\u5bc6`)
+      await loadKamiConfigs()
+      await loadKamiItems()
+    } else {
+      toast.error(res.msg || '\u6e05\u7406\u5931\u8d25')
+    }
+  } catch {
+    // User cancellation intentionally has no feedback.
+  } finally {
+    clearingUsedItems.value = false
+  }
+}
+const handleResetItem = async (item: KamiItem) => {
+  try {
+    await showConfirm('确定重置该卡券为未使用状态？', '重置确认')
+    const res = await resetKamiItem(item.id)
+    if (res.code === 200) {
+      toast.success('重置成功')
+      loadKamiItems()
+      loadKamiConfigs()
+    } else {
+      toast.error(res.msg || '重置失败')
+    }
+  } catch {}
+}
+
+const handleFilterChange = () => {
+  loadKamiItems()
+}
+
+const openAlertDialog = () => {
+  if (!selectedConfig.value) return
+  alertForm.value = {
+    alertEnabled: selectedConfig.value.alertEnabled || 0,
+    alertThresholdType: selectedConfig.value.alertThresholdType || 1,
+    alertThresholdValue: selectedConfig.value.alertThresholdValue || 10,
+    alertEmail: selectedConfig.value.alertEmail || ''
+  }
+  showAlertDialog.value = true
+}
+
+const handleSaveAlert = async () => {
+  if (!selectedConfigId.value) return
+  alertLoading.value = true
+  try {
+    const res = await saveKamiConfig({
+      id: selectedConfigId.value,
+      aliasName: selectedConfig.value?.aliasName,
+      alertEnabled: alertForm.value.alertEnabled,
+      alertThresholdType: alertForm.value.alertThresholdType,
+      alertThresholdValue: alertForm.value.alertThresholdValue,
+      alertEmail: alertForm.value.alertEmail
+    })
+    if (res.code === 200) {
+      toast.success('设置保存成功')
+      showAlertDialog.value = false
+      loadKamiConfigs()
+    } else {
+      toast.error(res.msg || '保存失败')
+    }
+  } catch (e) {
+    toast.error('保存失败')
+  } finally {
+    alertLoading.value = false
+  }
+}
+
+const openExportDialog = () => {
+  exportStatus.value = { unused: true, used: true }
+  showExportDialog.value = true
+}
+
+const handleExport = async () => {
+  if (!selectedConfigId.value) return
+  if (!exportStatus.value.unused && !exportStatus.value.used) {
+    toast.warning('请至少选择一种状态')
+    return
+  }
+
+  try {
+    const res = await exportKamiItems({
+      kamiConfigId: selectedConfigId.value,
+      includeUnused: exportStatus.value.unused,
+      includeUsed: exportStatus.value.used
+    })
+    const allItems = res.data || []
+
+    if (allItems.length === 0) {
+      toast.warning('没有可导出的数据')
+      return
+    }
+
+    const configName = selectedConfig.value?.aliasName || `配置${selectedConfigId.value}`
+    const timestamp = new Date().toISOString().slice(0, 19).replace(/[:-]/g, '').replace('T', '_')
+
+    const header = '序号\t卡券内容\t状态\t订单ID\t使用时间\t添加时间\n'
+    const rows = allItems.map(item =>
+      `${item.sortOrder}\t${item.kamiContent}\t${kamiStatusLabel(item.status)}\t${item.orderId || ''}\t${item.usedTime || ''}\t${item.createTime}`
+    ).join('\n')
+    const content = header + rows
+    const blob = new Blob(['\ufeff' + content], { type: 'text/plain;charset=utf-8' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `${configName}_${timestamp}.txt`
+    a.click()
+    URL.revokeObjectURL(url)
+    toast.success(`已导出 ${allItems.length} 条数据`)
+    showExportDialog.value = false
+  } catch (e) {
+    toast.error('导出失败')
+  }
+}
+
+onMounted(() => {
+  checkScreenSize()
+  window.addEventListener('resize', checkScreenSize)
+  if (setHeaderContent) setHeaderContent(null)
+  loadKamiConfigs()
+  void loadUploadAccounts()
+})
+
+onUnmounted(() => {
+  window.removeEventListener('resize', checkScreenSize)
+})
+</script>
+
+<template>
+  <div class="kami-page">
+
+    <!-- ===== 手机端 ===== -->
+    <template v-if="isMobile">
+
+      <!-- 配置列表视图 -->
+      <div v-if="!selectedConfigId" class="kami-mobile">
+        <header class="kami-mobile__header">
+          <div class="kami-mobile__header-top">
+            <h1 class="kami-page__title">卡券管理</h1>
+            <button class="btn-primary btn-sm" @click="showCreateDialog = true">
+              新建
+            </button>
+          </div>
+        </header>
+
+        <div class="kami-mobile__list">
+          <div v-if="configLoading" class="kami-page__empty">加载中...</div>
+          <div v-else-if="kamiConfigs.length === 0" class="kami-page__empty">暂无卡券库，点击右上角新建</div>
+          <div
+            v-for="config in kamiConfigs"
+            :key="config.id"
+            class="config-card"
+            @click="selectConfig(config)"
+          >
+            <div class="config-card__name">{{ config.aliasName || `卡券库#${config.id}` }}</div>
+            <div class="config-card__stats">
+              <template v-if="config.sourceType === 2">
+                <span class="tag tag--info">外部 API</span>
+                <span class="config-card__stat">按订单实时取卡</span>
+              </template>
+              <template v-else-if="config.sourceType === 3">
+                <span class="tag tag--fixed">固定内容</span>
+                <span class="config-card__stat">{{ contentPreview(config.fixedContent) }}</span>
+              </template>
+              <template v-else>
+                <span class="config-card__stat">总量 {{ config.totalCount }}</span>
+                <span class="config-card__stat used">已用 {{ config.usedCount }}</span>
+                <span class="config-card__stat avail">可用 {{ config.availableCount }}</span>
+              </template>
+              <span v-if="config.sourceType === 1 && config.alertEnabled === 1" class="tag tag--warning" style="margin-left: 4px;">预警</span>
+              <span class="config-card__stat">关联 {{ config.relatedGoodsCount || 0 }} 商品</span>
+            </div>
+            <button
+              class="config-card__del btn-danger btn-text btn-sm"
+              @click.stop="handleDeleteConfig(config)"
+            >删除</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 卡券详情视图 -->
+      <div v-else class="kami-mobile">
+        <header class="kami-mobile__header">
+          <div class="kami-mobile__header-top">
+            <button class="kami-mobile__back" @click="selectedConfigId = null; kamiItems = []">
+              ← 返回
+            </button>
+            <span class="kami-mobile__config-name">{{ selectedConfig?.aliasName || `卡券库#${selectedConfigId}` }}</span>
+          </div>
+          <div class="kami-mobile__detail-actions">
+            <button class="btn-default btn-sm" @click="openRelatedGoodsDialog">关联商品 {{ selectedConfig?.relatedGoodsCount || 0 }}</button>
+            <button class="btn-primary btn-sm" @click="openApiDialog">编辑卡券库</button>
+            <template v-if="isLocalSource">
+              <button class="btn-danger btn-sm" :disabled="clearingUsedItems" @click="handleClearUsedItems">{{ clearingUsedItems ? '\u6e05\u7406\u4e2d\u2026' : `\u6e05\u7406\u5df2\u4f7f\u7528\uff08${selectedConfig?.usedCount || 0}\uff09` }}</button>
+              <button class="btn-success btn-sm" @click="openExportDialog">导出</button>
+              <button class="btn-warning btn-sm" @click="openAlertDialog">预警</button>
+            </template>
+          </div>
+        </header>
+
+        <div v-if="isApiSource" class="api-source-panel">
+          <strong>外部 API 自动取卡</strong>
+          <p>买家付款后系统会按订单请求供应商接口。成功返回的卡密会缓存，重新发货时不会重复取卡。</p>
+          <button class="btn-primary btn-sm" @click="openApiDialog">编辑卡券库</button>
+        </div>
+
+        <div v-else-if="isFixedSource" class="api-source-panel api-source-panel--fixed">
+          <strong>固定内容发货</strong>
+          <p>{{ selectedConfig?.fixedContent || '尚未配置固定发货内容' }}</p>
+          <button class="btn-primary btn-sm" @click="openApiDialog">编辑卡券库</button>
+        </div>
+
+        <div v-if="isLocalSource" class="kami-mobile__filters">
+          <select
+            v-model="filterStatus"
+            class="native-select"
+            style="flex: 1;"
+            @change="handleFilterChange"
+          >
+            <option :value="undefined">全部状态</option>
+            <option :value="0">未使用</option>
+            <option :value="1">已使用</option>
+            <option :value="2">发货处理中</option>
+            <option :value="3">待核对</option>
+          </select>
+          <input
+            v-model="filterKeyword"
+            class="native-input"
+            placeholder="搜索卡券"
+            style="flex: 2;"
+            @keyup.enter="handleFilterChange"
+          />
+          <button class="btn-default" @click="handleFilterChange">搜索</button>
+        </div>
+
+        <div v-if="isLocalSource" class="kami-mobile__items">
+          <div v-if="itemsLoading" class="kami-page__empty">加载中...</div>
+          <div v-else-if="kamiItems.length === 0" class="kami-page__empty">暂无卡券</div>
+          <div
+            v-for="item in kamiItems"
+            :key="item.id"
+            class="kami-item-card"
+            :class="{ 'kami-item-card--used': item.status !== 0 }"
+          >
+            <div class="kami-item-card__content">{{ item.kamiContent }}</div>
+            <div class="kami-item-card__meta">
+              <span :class="item.status === 0 ? 'tag tag--success' : 'tag tag--info'">
+                {{ kamiStatusLabel(item.status) }}
+              </span>
+              <span v-if="item.usedTime" class="kami-item-card__time">{{ item.usedTime }}</span>
+            </div>
+            <div class="kami-item-card__actions">
+              <button v-if="canResetKamiItem(item)" class="btn-warning btn-text btn-sm" @click="handleResetItem(item)">重置</button>
+              <button v-if="canDeleteKamiItem(item)" class="btn-danger btn-text btn-sm" @click="handleDeleteItem(item)">删除</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </template>
+
+    <!-- ===== 桌面端 ===== -->
+    <template v-else>
+      <header class="kami-page__header">
+        <h1 class="kami-page__title">卡券管理</h1>
+        <div class="kami-page__actions">
+          <span class="kami-page__shared-hint">所有账号共享同一套卡券库存</span>
+          <button class="btn-primary" @click="showCreateDialog = true">
+            新建卡券库
+          </button>
+        </div>
+      </header>
+
+      <div class="kami-page__body">
+        <div class="kami-page__sidebar">
+          <div v-if="configLoading" class="kami-page__empty">加载中...</div>
+          <div v-else-if="kamiConfigs.length === 0" class="kami-page__empty">暂无卡券库，点击右上角新建</div>
+          <div
+            v-for="config in kamiConfigs"
+            :key="config.id"
+            class="config-card"
+            :class="{ 'config-card--active': selectedConfigId === config.id }"
+            @click="selectConfig(config)"
+          >
+            <div class="config-card__name">{{ config.aliasName || `卡券库#${config.id}` }}</div>
+            <div class="config-card__stats">
+              <template v-if="config.sourceType === 2">
+                <span class="tag tag--info">外部 API</span>
+                <span class="config-card__stat">按订单实时取卡</span>
+              </template>
+              <template v-else-if="config.sourceType === 3">
+                <span class="tag tag--fixed">固定内容</span>
+                <span class="config-card__stat">{{ contentPreview(config.fixedContent) }}</span>
+              </template>
+              <template v-else>
+                <span class="config-card__stat">总量 {{ config.totalCount }}</span>
+                <span class="config-card__stat used">已用 {{ config.usedCount }}</span>
+                <span class="config-card__stat avail">可用 {{ config.availableCount }}</span>
+              </template>
+              <span v-if="config.sourceType === 1 && config.alertEnabled === 1" class="tag tag--warning" style="margin-left: 4px;">预警</span>
+              <span class="config-card__stat">关联 {{ config.relatedGoodsCount || 0 }} 商品</span>
+            </div>
+            <button
+              class="config-card__del btn-danger btn-text btn-sm"
+              @click.stop="handleDeleteConfig(config)"
+            >删除</button>
+          </div>
+        </div>
+
+        <div class="kami-page__main">
+          <div v-if="!selectedConfig" class="kami-page__empty-main">请选择左侧卡券库</div>
+          <template v-else>
+            <div class="kami-detail__header">
+              <h2>{{ selectedConfig.aliasName || `卡券库#${selectedConfig.id}` }}</h2>
+              <div class="kami-detail__actions">
+                <button class="btn-default" @click="openRelatedGoodsDialog">关联商品 {{ selectedConfig.relatedGoodsCount || 0 }}</button>
+                <button class="btn-primary" @click="openApiDialog">编辑卡券库</button>
+                <template v-if="isLocalSource">
+                  <button class="btn-danger" :disabled="clearingUsedItems" @click="handleClearUsedItems">{{ clearingUsedItems ? '\u6e05\u7406\u4e2d\u2026' : `\u6e05\u7406\u5df2\u4f7f\u7528\uff08${selectedConfig.usedCount || 0}\uff09` }}</button>
+
+                  <button class="btn-success" @click="openExportDialog">导出</button>
+                  <button class="btn-warning" @click="openAlertDialog">预警配置</button>
+                </template>
+              </div>
+            </div>
+
+            <div v-if="isApiSource" class="api-source-panel">
+              <strong>外部 API 自动取卡</strong>
+              <p>当前卡券库不保存本地卡密。每笔订单会请求一次供应商接口，接口成功内容会按订单缓存，消息重试不会重复扣卡。</p>
+              <button class="btn-primary" @click="openApiDialog">编辑卡券库</button>
+            </div>
+
+            <div v-else-if="isFixedSource" class="api-source-panel api-source-panel--fixed">
+              <strong>固定内容发货</strong>
+              <p>{{ selectedConfig.fixedContent || '尚未配置固定发货内容' }}</p>
+              <button class="btn-primary" @click="openApiDialog">编辑卡券库</button>
+            </div>
+
+            <div v-if="isLocalSource" class="kami-detail__filters">
+              <select
+                v-model="filterStatus"
+                class="native-select"
+                style="width: 120px; margin-right: 8px;"
+                @change="handleFilterChange"
+              >
+                <option :value="undefined">全部状态</option>
+                <option :value="0">未使用</option>
+                <option :value="1">已使用</option>
+                <option :value="2">发货处理中</option>
+                <option :value="3">待核对</option>
+              </select>
+              <input
+                v-model="filterKeyword"
+                class="native-input"
+                placeholder="搜索卡券内容"
+                style="width: 200px; margin-right: 8px;"
+                @keyup.enter="handleFilterChange"
+              />
+              <button class="btn-default" @click="handleFilterChange">搜索</button>
+              <div class="kami-batch-actions">
+                <label class="kami-batch-actions__select">
+                  <input type="checkbox" :checked="allVisibleKamiItemsSelected" @change="toggleVisibleKamiItems" />
+                  全选当前列表
+                </label>
+                <span v-if="selectedKamiItemIds.length" class="kami-batch-actions__count">已选 {{ selectedKamiItemIds.length }} 张</span>
+                <button class="btn-danger btn-sm" :disabled="!selectedKamiDeleteCount || batchKamiActionLoading" @click="handleBatchDeleteKamiItems">删除所选（{{ selectedKamiDeleteCount }}）</button>
+                <button class="btn-warning btn-sm" :disabled="!selectedKamiResetCount || batchKamiActionLoading" @click="handleBatchResetKamiItems">重置所选（{{ selectedKamiResetCount }}）</button>
+              </div>
+            </div>
+
+            <div v-if="isLocalSource" class="kami-detail__table">
+              <div v-if="itemsLoading" class="kami-page__empty">加载中...</div>
+              <template v-else>
+                <div v-if="kamiItems.length === 0" class="kami-page__empty">暂无卡券</div>
+                <table v-else class="kami-table">
+                  <thead>
+                    <tr>
+                      <th class="kami-table__cell--select"><input type="checkbox" :checked="allVisibleKamiItemsSelected" @change="toggleVisibleKamiItems" title="全选当前列表可操作卡券" /></th>
+                      <th>序号</th>
+                      <th>卡券内容</th>
+                      <th>状态</th>
+                      <th>订单ID</th>
+                      <th>使用时间</th>
+                      <th>添加时间</th>
+                      <th>操作</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr v-for="item in kamiItems" :key="item.id" :class="{ 'kami-table__row--used': item.status !== 0 }">
+                      <td class="kami-table__cell--select"><input v-model="selectedKamiItemIds" type="checkbox" :value="item.id" :disabled="!canDeleteKamiItem(item)" :title="canDeleteKamiItem(item) ? '选择卡券' : '发货处理中，暂不可操作'" /></td>
+                      <td class="kami-table__cell--num">{{ item.sortOrder }}</td>
+                      <td class="kami-table__cell--content">{{ item.kamiContent }}</td>
+                      <td>
+                        <span class="kami-table__status" :class="item.status === 0 ? 'kami-table__status--unused' : 'kami-table__status--used'">
+                          {{ kamiStatusLabel(item.status) }}
+                        </span>
+                      </td>
+                      <td class="kami-table__cell--id">{{ item.orderId || '-' }}</td>
+                      <td class="kami-table__cell--time">{{ item.usedTime || '-' }}</td>
+                      <td class="kami-table__cell--time">{{ item.createTime }}</td>
+                      <td>
+                        <div class="kami-table__actions">
+                          <button v-if="canResetKamiItem(item)" class="kami-table__action-btn kami-table__action-btn--reset" @click="handleResetItem(item)">重置</button>
+                          <button v-if="canDeleteKamiItem(item)" class="kami-table__action-btn kami-table__action-btn--delete" @click="handleDeleteItem(item)">删除</button>
+                        </div>
+                      </td>
+                    </tr>
+                  </tbody>
+                </table>
+              </template>
+            </div>
+          </template>
+        </div>
+      </div>
+    </template>
+
+    <!-- ===== 弹窗（共用） ===== -->
+    <Teleport to="body">
+      <!-- 新建卡券库 -->
+      <Transition name="modal">
+        <div v-if="showCreateDialog" class="modal-overlay" @click.self="showCreateDialog = false">
+          <div class="modal-container">
+            <div class="modal-header">
+              <h2 class="modal-title">新建卡券库</h2>
+              <button class="modal-close" @click="showCreateDialog = false">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="form-row">
+                <label class="form-label">别名</label>
+                <input v-model="createForm.aliasName" class="form-input" placeholder="请输入别名" maxlength="50" />
+              </div>
+              <div class="form-row">
+                <label class="form-label">卡券来源</label>
+                <div class="form-radio-group">
+                  <label class="form-radio" :class="{ 'is-active': createForm.sourceType === 1 }">
+                    <input type="radio" :value="1" v-model="createForm.sourceType" />本地库存
+                  </label>
+                  <label class="form-radio" :class="{ 'is-active': createForm.sourceType === 2 }">
+                    <input type="radio" :value="2" v-model="createForm.sourceType" />外部 API 自动取卡
+                  </label>
+                  <label class="form-radio" :class="{ 'is-active': createForm.sourceType === 3 }">
+                    <input type="radio" :value="3" v-model="createForm.sourceType" />固定内容发货
+                  </label>
+                </div>
+              </div>
+              <p v-if="createForm.sourceType === 2" class="form-hint">创建后可在该卡券库中继续填写 API 地址、请求参数和返回内容路径。</p>
+              <p v-else-if="createForm.sourceType === 3" class="form-hint">创建后填写一次网盘链接、教程或说明；每笔订单都会发送同样的内容，不扣库存。</p>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" @click="showCreateDialog = false">取消</button>
+              <button class="btn btn-primary" :class="{ 'is-loading': createLoading }" :disabled="createLoading" @click="handleCreate">确定</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 统一编辑卡券库 -->
+      <Transition name="modal">
+        <div v-if="showApiDialog" class="modal-overlay" @click.self="showApiDialog = false">
+          <div class="modal-container modal-container--lg">
+            <div class="modal-header">
+              <div>
+                <h2 class="modal-title">编辑卡券库</h2>
+                <p class="form-hint">统一维护名称、来源内容、卡券导入和发货消息模板。</p>
+              </div>
+              <button class="modal-close" @click="showApiDialog = false">×</button>
+            </div>
+            <div class="modal-body api-config-form">
+              <div class="form-row">
+                <label class="form-label">卡券库名称</label>
+                <input v-model="apiForm.aliasName" class="form-input" maxlength="50" placeholder="请输入卡券库名称" />
+              </div>
+              <div class="form-row">
+                <label class="form-label">卡券来源</label>
+                <div class="form-radio-group">
+                  <label class="form-radio" :class="{ 'is-active': apiForm.sourceType === 1 }">
+                    <input type="radio" :value="1" v-model="apiForm.sourceType" />本地库存卡券
+                  </label>
+                  <label class="form-radio" :class="{ 'is-active': apiForm.sourceType === 2 }">
+                    <input type="radio" :value="2" v-model="apiForm.sourceType" />外部 API 自动取卡
+                  </label>
+                  <label class="form-radio" :class="{ 'is-active': apiForm.sourceType === 3 }">
+                    <input type="radio" :value="3" v-model="apiForm.sourceType" />固定内容发货
+                  </label>
+                </div>
+              </div>
+
+              <template v-if="apiForm.sourceType === 2">
+                <p class="form-hint api-config-form__intro">付款后系统会请求一次供应商接口；成功取到的卡密会绑定订单缓存，重新发货不会重复取卡。</p>
+                <div class="form-row">
+                  <label class="form-label">接口地址</label>
+                  <input v-model="apiForm.apiUrl" class="form-input" placeholder="https://supplier.example.com/api/card" />
+                </div>
+                <div class="form-row form-row--inline">
+                  <label class="form-label">请求方式</label>
+                  <select v-model="apiForm.apiMethod" class="native-select" style="width: 130px;">
+                    <option value="POST">POST（JSON 请求体）</option>
+                    <option value="GET">GET（URL 参数）</option>
+                  </select>
+                  <label class="form-label api-config-form__timeout">超时</label>
+                  <input v-model.number="apiForm.apiTimeoutSeconds" class="form-input form-input--num" type="number" min="3" max="30" />
+                  <span class="form-suffix">秒，3–30</span>
+                </div>
+                <div class="form-row">
+                  <label class="form-label">请求头（可选）</label>
+                  <textarea v-model="apiForm.apiHeaders" class="form-textarea" :rows="3" placeholder='{"Authorization":"Bearer YOUR_TOKEN"}'></textarea>
+                  <p class="form-hint">必须是 JSON 对象。可放 API 密钥，例如 Authorization、X-Api-Key。</p>
+                </div>
+                <div class="form-row">
+                  <label class="form-label">请求参数</label>
+                  <textarea v-model="apiForm.apiRequestTemplate" class="form-textarea" :rows="7" placeholder='{"orderId":"&#123;&#123;orderId&#125;&#125;","quantity":"&#123;&#123;quantity&#125;&#125;"}'></textarea>
+                  <p v-pre class="form-hint">POST 会作为 JSON 请求体发送，GET 会转为 URL 参数。可用变量：{{orderId}}、{{goodsId}}、{{buyerName}}、{{skuId}}、{{quantity}}、{{accountId}}。</p>
+                </div>
+                <div class="form-row">
+                  <label class="form-label">返回内容路径</label>
+                  <input v-model="apiForm.apiResultPath" class="form-input" placeholder="例如 data.card；留空会自动尝试 content、card、kami" />
+                  <p class="form-hint">填写接口响应中实际卡密所在字段。例：返回 {"data":{"card":"abc"}} 时填写 data.card。</p>
+                </div>
+                <p class="form-hint api-config-form__warning">测试接口会真实请求供应商。若供应商没有测试环境，请不要对正式出卡接口点击测试，避免提前出卡。</p>
+                <div v-if="apiTestResult" class="api-config-form__test-result">{{ apiTestResult }}</div>
+              </template>
+
+              <template v-else-if="apiForm.sourceType === 3">
+                <p class="form-hint api-config-form__intro">适合网盘链接、教程、提取码说明等内容。保存一次后，每笔已关联商品的订单都会发送同样内容，不需要设置库存数量。</p>
+                <div class="form-row">
+                  <label class="form-label">固定发货内容</label>
+                  <textarea v-model="apiForm.fixedContent" class="form-textarea" :rows="7" maxlength="200" placeholder="例如：网盘链接：https://...&#10;提取码：1234&#10;如有问题请联系我。"></textarea>
+                  <p class="form-hint">最多 200 个字符，受闲鱼虚拟发货内容限制。</p>
+                </div>
+              </template>
+
+              <template v-else>
+                <p class="form-hint api-config-form__intro">每行输入一条卡券。保存时会追加到现有库存，重复内容自动跳过；留空则只保存其他配置。</p>
+                <div class="form-row">
+                  <label class="form-label">添加卡券</label>
+                  <textarea v-model="apiForm.importContent" class="form-textarea" :rows="8" placeholder="卡券1&#10;卡券2&#10;卡券3"></textarea>
+                  <p class="form-hint">既支持单条添加，也支持多行批量导入，不会清空已有库存和使用记录。</p>
+                </div>
+              </template>
+
+              <section class="api-config-form__template delivery-flow">
+                <div class="delivery-flow__heading">
+                  <div>
+                    <strong>发货流程</strong>
+                    <span>图片先发送，随后按顺序发送每条文字消息</span>
+                  </div>
+                  <span class="delivery-flow__count">{{ deliveryTemplateMessages.length + ((apiForm.deliveryImageUrl || configuredDeliveryImages.length) ? 1 : 0) }} 条内容</span>
+                </div>
+                <div class="delivery-flow__preview">
+                  <div class="delivery-flow__preview-item" :class="{ 'is-disabled': !apiForm.deliveryImageUrl && !configuredDeliveryImages.length }">
+                    <b>1</b><span>图片</span><em>{{ apiForm.deliveryImageUrl || configuredDeliveryImages.length ? '已配置' : '可选' }}</em>
+                  </div>
+                  <div v-for="(_, index) in deliveryTemplateMessages" :key="index" class="delivery-flow__preview-item">
+                    <b>{{ index + 2 }}</b><span>{{ index === 0 ? '卡密/发货内容' : `文字消息 ${index + 1}` }}</span><em>单独发送</em>
+                  </div>
+                </div>
+
+                <div class="delivery-message-step">
+                  <div class="delivery-message-step__head">
+                    <span class="delivery-message-step__number">1</span>
+                    <div><strong>发货图片（可选）</strong><small>图片会作为第一条消息发送</small></div>
+                  </div>
+                  <div class="delivery-image-control">
+                    <input ref="deliveryImageInput" type="file" accept="image/*" class="delivery-image-control__input" @change="uploadDeliveryImage" />
+                    <div class="delivery-image-account-picker">
+                      <div class="delivery-image-account-picker__head">
+                        <strong>选择上传账号</strong>
+                        <button type="button" class="btn btn-text btn-sm" :disabled="deliveryImageUploading || uploadCapableAccounts.length === 0" @click="toggleAllUploadAccounts">
+                          {{ allUploadAccountsSelected ? '取消全选' : '全选可用账号' }}
+                        </button>
+                      </div>
+                      <div v-if="uploadAccounts.length" class="delivery-image-account-picker__list">
+                        <label v-for="account in uploadAccounts" :key="account.id" class="delivery-image-account-option" :class="{ 'is-disabled': account.status !== 1 }">
+                          <input v-model="deliveryImageUploadAccountIds" type="checkbox" :value="account.id" :disabled="deliveryImageUploading || account.status !== 1" />
+                          <span>{{ accountDisplayName(account) }}</span>
+                          <em>{{ account.status === 1 ? '可用' : '不可用' }}</em>
+                        </label>
+                      </div>
+                      <span v-else class="delivery-image-account-picker__empty">暂无可用账号</span>
+                    </div>
+                    <div class="delivery-image-control__actions">
+                      <button type="button" class="btn btn-secondary btn-sm" :disabled="deliveryImageUploading || deliveryImageUploadAccountIds.length === 0" @click="chooseDeliveryImage">
+                        {{ deliveryImageUploading ? `上传中 ${deliveryImageUploadProgress.completed}/${deliveryImageUploadProgress.total}` : `上传到 ${deliveryImageUploadAccountIds.length} 个账号` }}
+                      </button>
+                      <button v-if="apiForm.deliveryImageUrl || configuredDeliveryImages.length" type="button" class="btn btn-danger btn-sm" :disabled="deliveryImageUploading" @click="clearAllDeliveryImages">清空全部</button>
+                    </div>
+                    <div v-if="apiForm.deliveryImageUrl" class="delivery-image-item delivery-image-item--legacy">
+                      <img :src="apiForm.deliveryImageUrl" class="delivery-image-control__preview" alt="旧版自动发货图片预览" />
+                      <span><strong>旧版共享图片</strong><small>所有未单独配置的账号继续使用</small></span>
+                      <button type="button" class="btn btn-danger btn-text btn-sm" :disabled="deliveryImageUploading" @click="apiForm.deliveryImageUrl = ''">移除</button>
+                    </div>
+                    <div v-if="configuredDeliveryImages.length" class="delivery-image-list">
+                      <div v-for="item in configuredDeliveryImages" :key="item.accountId" class="delivery-image-item">
+                        <img :src="item.imageUrl" class="delivery-image-control__preview" :alt="`${item.accountName}发货图片预览`" />
+                        <span><strong>{{ item.accountName }}</strong><small>账号 #{{ item.accountId }}</small></span>
+                        <button type="button" class="btn btn-danger btn-text btn-sm" :disabled="deliveryImageUploading" @click="removeAccountDeliveryImage(item.accountId)">移除</button>
+                      </div>
+                    </div>
+                  </div>
+                  <p class="delivery-message-step__hint">按成交账号使用对应图片；商品单独配置的图片优先。</p>
+                </div>
+
+                <div class="delivery-message-step">
+                  <div class="delivery-message-step__head">
+                    <span class="delivery-message-step__number">2</span>
+                    <div><strong>文字消息</strong><small>卡密和联系方式可以拆成不同消息</small></div>
+                  </div>
+                  <textarea
+                    ref="deliveryTemplateTextarea"
+                    v-model="apiForm.deliveryTemplate"
+                    class="form-textarea delivery-message-step__textarea"
+                    :rows="7"
+                    maxlength="2000"
+                    placeholder="卡密：&#10;{DELIVERY_CONTENT}&#10;######&#10;联系方式："
+                  ></textarea>
+                  <div class="delivery-message-step__actions">
+                    <button type="button" class="btn btn-secondary btn-sm" @click="addDeliveryMessage">添加下一条文字消息</button>
+                    <span>当前 {{ deliveryTemplateMessages.length }} 条文字消息</span>
+                  </div>
+                  <div class="delivery-message-preview">
+                    <div v-for="(message, index) in deliveryTemplateMessages" :key="index" class="delivery-message-preview__item">
+                      <span>{{ deliveryMessageLabel(index) }}</span>
+                      <p>{{ message || '待填写' }}</p>
+                    </div>
+                  </div>
+                  <p v-pre class="delivery-message-step__hint">留空时直接发送卡券内容；模板必须包含 {DELIVERY_CONTENT}。旧模板中的 {kmKey} 仍然兼容。</p>
+                  <div class="delivery-template-guide">
+                    <div class="delivery-template-guide__head">
+                      <strong>可用变量</strong>
+                      <span>点击变量插入到光标位置</span>
+                    </div>
+                    <div class="delivery-template-guide__grid">
+                      <button
+                        v-for="variable in deliveryTemplateVariables"
+                        :key="variable.token"
+                        type="button"
+                        class="delivery-template-variable"
+                        :title="`插入 ${variable.token}`"
+                        @click="insertDeliveryTemplateVariable(variable.token)"
+                      >
+                        <span class="delivery-template-variable__top">
+                          <code>{{ variable.token }}</code>
+                          <b>{{ variable.name }}</b>
+                          <em v-if="variable.required">必填</em>
+                        </span>
+                        <small>{{ variable.description }}</small>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" @click="showApiDialog = false">取消</button>
+              <button v-if="apiForm.sourceType === 2" class="btn btn-secondary" :disabled="apiTesting" @click="handleTestApi">{{ apiTesting ? '测试中…' : '测试接口' }}</button>
+              <button class="btn btn-primary" :class="{ 'is-loading': apiSaving }" :disabled="apiSaving" @click="handleSaveApi">保存卡券库</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 关联商品 -->
+      <Transition name="modal">
+        <div v-if="showRelatedGoodsDialog" class="modal-overlay" @click.self="showRelatedGoodsDialog = false">
+          <div class="modal-container modal-container--wide">
+            <div class="modal-header">
+              <div>
+                <h2 class="modal-title">关联商品</h2>
+                <p class="form-hint">关联后会自动开启商品的自动发货，并使用当前卡券库作为发货来源。</p>
+              </div>
+              <button class="modal-close" @click="showRelatedGoodsDialog = false">×</button>
+            </div>
+            <div class="modal-body related-goods">
+              <div class="related-goods__warning">若商品原本有其他自动发货配置，保存关联后会由「{{ selectedConfig?.aliasName || '当前卡券库' }}」接管；取消关联则会关闭该商品由本卡券库提供的自动发货。</div>
+              <div class="related-goods__grid">
+                <section class="related-goods__column">
+                  <div class="related-goods__column-head">
+                    <div>
+                      <strong>可选商品</strong>
+                      <span>共 {{ filteredRelatedGoods.length }} 个</span>
+                    </div>
+                    <button class="btn-text btn-sm" :disabled="filteredRelatedGoods.length === 0" @click="toggleFilteredRelatedGoods">
+                      {{ allFilteredRelatedGoodsSelected ? '取消当前全选' : '全选当前结果' }}
+                    </button>
+                  </div>
+                  <div class="related-goods__filters">
+                    <input v-model="relatedGoodsKeyword" class="form-input related-goods__search" placeholder="搜索商品名、商品 ID 或账号备注" />
+                    <select v-model="relatedGoodsAccountFilter" class="native-select related-goods__account-filter">
+                      <option value="all">所有账号</option>
+                      <option v-for="account in relatedGoodsAccounts" :key="account.id" :value="String(account.id)">{{ account.name }}</option>
+                    </select>
+                  </div>
+                  <div class="related-goods__list">
+                    <div v-if="relatedGoodsLoading" class="related-goods__empty">加载中…</div>
+                    <div v-else-if="filteredRelatedGoods.length === 0" class="related-goods__empty">没有匹配的商品</div>
+                    <label v-else v-for="goods in filteredRelatedGoods" :key="relatedGoodsKey(goods)" class="related-goods__item">
+                      <input v-model="selectedRelatedGoodsKeys" type="checkbox" :value="relatedGoodsKey(goods)" />
+                      <img v-if="goods.coverPic" :src="goods.coverPic" class="related-goods__cover" alt="" />
+                      <span v-else class="related-goods__cover related-goods__cover--empty">商品</span>
+                      <span class="related-goods__info">
+                        <strong :title="goods.goodsTitle">{{ goods.goodsTitle || `商品 ${goods.xyGoodsId}` }}</strong>
+                        <small><b>{{ goods.accountNote || '未知账号' }}</b> · ID: {{ goods.xyGoodsId }}<template v-if="goods.soldPrice"> · ¥{{ goods.soldPrice }}</template></small>
+                        <em v-if="goods.willReplace && !goods.associated">已有发货配置，关联后将由当前卡券库接管</em>
+                      </span>
+                    </label>
+                  </div>
+                </section>
+                <section class="related-goods__column related-goods__column--selected">
+                  <div class="related-goods__column-head">
+                    <div>
+                      <strong>已选择商品</strong>
+                      <span>共 {{ selectedRelatedGoods.length }} 个</span>
+                    </div>
+                    <button class="btn-text btn-sm" :disabled="selectedRelatedGoods.length === 0" @click="clearRelatedGoodsSelection">清空选择</button>
+                  </div>
+                  <div class="related-goods__list">
+                    <div v-if="selectedRelatedGoods.length === 0" class="related-goods__empty">请在左侧勾选需要使用当前卡券库发货的商品</div>
+                    <div v-else v-for="goods in selectedRelatedGoods" :key="relatedGoodsKey(goods)" class="related-goods__selected-item">
+                      <img v-if="goods.coverPic" :src="goods.coverPic" class="related-goods__cover" alt="" />
+                      <span v-else class="related-goods__cover related-goods__cover--empty">商品</span>
+                      <span>
+                        <strong :title="goods.goodsTitle">{{ goods.goodsTitle || `商品 ${goods.xyGoodsId}` }}</strong>
+                        <small><b>{{ goods.accountNote || '未知账号' }}</b> · ID: {{ goods.xyGoodsId }}<template v-if="goods.soldPrice"> · ¥{{ goods.soldPrice }}</template></small>
+                      </span>
+                      <button class="btn-danger btn-text btn-sm" @click="removeRelatedGoods(goods)">移除</button>
+                    </div>
+                  </div>
+                </section>
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" @click="showRelatedGoodsDialog = false">取消</button>
+              <button class="btn btn-primary" :class="{ 'is-loading': relatedGoodsSaving }" :disabled="relatedGoodsSaving || relatedGoodsLoading || !relatedGoodsDirty" @click="handleSaveRelatedGoods">保存关联（{{ selectedRelatedGoods.length }} 个商品）</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 预警配置 -->
+      <Transition name="modal">
+        <div v-if="showAlertDialog" class="modal-overlay" @click.self="showAlertDialog = false">
+          <div class="modal-container">
+            <div class="modal-header">
+              <h2 class="modal-title">预警配置</h2>
+              <button class="modal-close" @click="showAlertDialog = false">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="form-row">
+                <label class="form-label">开启预警</label>
+                <label class="form-switch">
+                  <input type="checkbox" :checked="alertForm.alertEnabled === 1" @change="alertForm.alertEnabled = alertForm.alertEnabled === 1 ? 0 : 1" />
+                  <span class="form-switch-track"></span>
+                </label>
+              </div>
+              <div class="form-row">
+                <label class="form-label">阈值类型</label>
+                <div class="form-radio-group">
+                  <label class="form-radio" :class="{ 'is-active': alertForm.alertThresholdType === 1 }">
+                    <input type="radio" :value="1" v-model="alertForm.alertThresholdType" />数量
+                  </label>
+                  <label class="form-radio" :class="{ 'is-active': alertForm.alertThresholdType === 2 }">
+                    <input type="radio" :value="2" v-model="alertForm.alertThresholdType" />百分比
+                  </label>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label">阈值数值</label>
+                <input type="number" v-model.number="alertForm.alertThresholdValue" class="form-input form-input--num" :min="1" :max="alertForm.alertThresholdType === 2 ? 100 : 99999" />
+                <span class="form-suffix">{{ alertForm.alertThresholdType === 1 ? '可用卡券低于此数量时预警' : '可用比例低于此百分比时预警' }}</span>
+              </div>
+              <div class="form-row">
+                <label class="form-label">预警邮箱</label>
+                <input v-model="alertForm.alertEmail" class="form-input" placeholder="留空则使用系统设置的邮箱" />
+              </div>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" @click="showAlertDialog = false">取消</button>
+              <button class="btn btn-primary" :class="{ 'is-loading': alertLoading }" :disabled="alertLoading" @click="handleSaveAlert">保存</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- 导出卡券 -->
+      <Transition name="modal">
+        <div v-if="showExportDialog" class="modal-overlay" @click.self="showExportDialog = false">
+          <div class="modal-container">
+            <div class="modal-header">
+              <h2 class="modal-title">导出卡券</h2>
+              <button class="modal-close" @click="showExportDialog = false">×</button>
+            </div>
+            <div class="modal-body">
+              <div class="form-row">
+                <label class="form-label">导出状态</label>
+                <div class="form-checkbox-group">
+                  <label class="form-checkbox">
+                    <input type="checkbox" v-model="exportStatus.unused" />未使用
+                  </label>
+                  <label class="form-checkbox">
+                    <input type="checkbox" v-model="exportStatus.used" />已使用
+                  </label>
+                </div>
+              </div>
+              <p class="form-hint form-hint--indent">导出为Excel格式（.txt文件，Excel可直接打开）</p>
+            </div>
+            <div class="modal-footer">
+              <button class="btn btn-secondary" @click="showExportDialog = false">取消</button>
+              <button class="btn btn-primary" @click="handleExport">导出</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+    </Teleport>
+  </div>
+</template>
+
+<style scoped>
+.kami-page {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  padding: 16px;
+  background: rgba(255,255,255,0.55);
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+/* ===== 桌面端 ===== */
+.kami-page__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 16px;
+  flex-shrink: 0;
+}
+.kami-page__title {
+  font-size: 20px;
+  font-weight: 600;
+  color: #1c1c1e;
+  margin: 0;
+}
+.kami-page__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kami-page__shared-hint {
+  font-size: 13px;
+  color: rgba(28,28,30,.55);
+}
+.kami-page__body {
+  flex: 1;
+  display: flex;
+  gap: 16px;
+  min-height: 0;
+  overflow: hidden;
+}
+.kami-page__sidebar {
+  width: 260px;
+  flex-shrink: 0;
+  overflow-y: auto;
+  border-right: 1px solid rgba(60,60,67,.12);
+  padding-right: 12px;
+}
+.kami-page__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+.kami-page__empty,
+.kami-page__empty-main {
+  color: rgba(28,28,30,.55);
+  font-size: 14px;
+  text-align: center;
+  padding: 40px 0;
+}
+.config-card {
+  padding: 12px;
+  border: 1px solid rgba(60,60,67,.12);
+  border-radius: 8px;
+  margin-bottom: 8px;
+  cursor: pointer;
+  transition: all 0.2s;
+  position: relative;
+}
+.config-card:hover {
+  border-color: rgba(0,122,255,0.3);
+}
+.config-card--active {
+  border-color: #0A84FF;
+  background: rgba(10,132,255,0.06);
+}
+.config-card__name {
+  font-size: 14px;
+  font-weight: 600;
+  color: #1c1c1e;
+  margin-bottom: 6px;
+}
+.config-card__stats {
+  display: flex;
+  gap: 8px;
+  font-size: 12px;
+  color: rgba(28,28,30,.55);
+  margin-bottom: 4px;
+  flex-wrap: wrap;
+}
+.config-card__stat.used { color: #FF9F0A; }
+.config-card__stat.avail { color: #30D158; }
+.config-card__del {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+}
+.kami-detail__header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+.kami-detail__header h2 {
+  font-size: 16px;
+  font-weight: 600;
+  color: #1c1c1e;
+  margin: 0;
+}
+.kami-detail__actions {
+  display: flex;
+  gap: 8px;
+}
+.kami-detail__filters {
+  display: flex;
+  align-items: center;
+  margin-bottom: 12px;
+  flex-shrink: 0;
+}
+.kami-detail__table {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+}
+
+.kami-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: auto;
+}
+
+.kami-table th {
+  background: rgba(255,255,255,0.55);
+  backdrop-filter: blur(16px) saturate(1.6);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6);
+  padding: 12px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1c1c1e;
+  letter-spacing: .4px;
+  text-align: left;
+  border-bottom: 1px solid rgba(60,60,67,.12);
+  white-space: nowrap;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.kami-table td {
+  padding: 10px 16px;
+  font-size: 13px;
+  color: #1c1c1e;
+  border-bottom: 1px solid rgba(60,60,67,.08);
+}
+
+.kami-table tbody tr:hover {
+  background: rgba(255,255,255,0.38);
+}
+
+.kami-table__row--used {
+  opacity: .6;
+}
+
+.kami-table__cell--num {
+  font-size: 12px;
+  color: rgba(28,28,30,.55);
+}
+
+.kami-table__cell--content {
+  max-width: 300px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.kami-table__cell--id {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: 'SF Mono', 'Menlo', monospace;
+  font-size: 12px;
+}
+
+.kami-table__cell--time {
+  white-space: nowrap;
+  font-size: 12px;
+  color: rgba(28,28,30,.55);
+}
+
+.kami-table__status {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.kami-table__status--unused {
+  background: rgba(48,209,88,0.12);
+  color: #30D158;
+}
+
+.kami-table__status--used {
+  background: rgba(120,120,128,0.12);
+  color: rgba(28,28,30,.55);
+}
+
+.kami-table__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.kami-table__action-btn {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 100px;
+  font-size: 12px;
+  font-weight: 590;
+  cursor: pointer;
+  transition: opacity .15s, transform .12s;
+  font-family: inherit;
+}
+
+.kami-table__action-btn:active { opacity: .80; transform: scale(.96); }
+
+.kami-table__action-btn--reset {
+  color: #FF9F0A;
+  background: rgba(255,159,10,0.12);
+}
+
+.kami-table__action-btn--delete {
+  color: #FF453A;
+  background: rgba(255,69,58,0.12);
+}
+
+/* ===== 手机端 ===== */
+.kami-mobile {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.kami-mobile__header {
+  flex-shrink: 0;
+  padding: 0 0 12px;
+  border-bottom: 1px solid rgba(60,60,67,.12);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.kami-mobile__header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.kami-mobile__select {
+  width: 100%;
+}
+
+.kami-mobile__back {
+  background: none;
+  border: none;
+  color: #0A84FF;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 0;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.kami-mobile__config-name {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1c1c1e;
+  flex: 1;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 0 8px;
+}
+
+.kami-mobile__detail-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.kami-mobile__filters {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(60,60,67,.12);
+}
+
+.kami-mobile__list {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: 12px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.kami-mobile__list::-webkit-scrollbar { display: none; }
+
+.kami-mobile__items {
+  flex: 1;
+  overflow-y: auto;
+  padding-top: 8px;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.kami-mobile__items::-webkit-scrollbar { display: none; }
+
+/* 卡密条目卡片 */
+.kami-item-card {
+  padding: 10px 12px;
+  border-bottom: 0.5px solid rgba(60,60,67,.12);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.kami-item-card:nth-child(even) {
+  background: rgba(255,255,255,0.15);
+}
+.kami-item-card--used {
+  opacity: 0.6;
+}
+.kami-item-card__content {
+  font-size: 13px;
+  font-weight: 500;
+  color: #1c1c1e;
+  word-break: break-all;
+}
+.kami-item-card__meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.kami-item-card__time {
+  font-size: 11px;
+  color: rgba(28,28,30,.55);
+}
+.kami-item-card__actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* ===== 弹窗样式 ===== */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.20);
+  backdrop-filter: blur(28px) saturate(1.8);
+  -webkit-backdrop-filter: blur(28px) saturate(1.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 2000;
+  padding: 24px;
+}
+
+.modal-container {
+  background: rgba(255,255,255,0.72);
+  backdrop-filter: blur(40px) saturate(2);
+  -webkit-backdrop-filter: blur(40px) saturate(2);
+  border: 1px solid rgba(255,255,255,0.75);
+  border-radius: 20px;
+  width: 100%;
+  max-width: 400px;
+  max-height: 85vh;
+  box-shadow: 0 16px 48px rgba(0,0,0,0.16), 0 2px 8px rgba(0,0,0,0.08);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.modal-container--lg {
+  max-width: 720px;
+}
+
+.modal-container--wide {
+  max-width: 980px;
+}
+
+.api-source-panel {
+  margin: 12px 0;
+  padding: 18px;
+  border: 1px solid rgba(10,132,255,.20);
+  border-radius: 12px;
+  background: rgba(10,132,255,.06);
+  color: #1c1c1e;
+}
+.api-source-panel strong { display: block; font-size: 14px; }
+.api-source-panel p {
+  margin: 8px 0 14px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: rgba(28,28,30,.66);
+}
+.api-source-panel--fixed {
+  border-color: rgba(175,82,222,.22);
+  background: rgba(175,82,222,.07);
+}
+.api-config-form .form-row {
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.api-config-form .form-label { padding-top: 8px; }
+.api-config-form .form-textarea,
+.api-config-form .form-hint,
+.api-config-form .form-input:not(.form-input--num) {
+  flex: 1 1 calc(100% - 80px);
+}
+.api-config-form .form-hint { margin-left: 80px; }
+.api-config-form__intro { line-height: 1.6; }
+.api-config-form__timeout { margin-left: 16px; }
+.api-config-form__test-result {
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: #0a7b35;
+  background: rgba(48,209,88,.10);
+  border-radius: 8px;
+  padding: 10px 12px;
+  font-size: 12px;
+}
+.api-config-form__template {
+  margin-top: 8px;
+  padding-top: 18px;
+  border-top: 1px solid rgba(60,60,67,.12);
+}
+.api-config-form__template code {
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: rgba(10,132,255,.08);
+  color: #0969b8;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+.delivery-image-control {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.delivery-image-control__input { display: none; }
+.delivery-image-control__actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.delivery-image-account-picker {
+  overflow: hidden;
+  border: 1px solid rgba(60,60,67,.14);
+  border-radius: 8px;
+  background: #fff;
+}
+.delivery-image-account-picker__head {
+  min-height: 38px;
+  padding: 5px 10px 5px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid rgba(60,60,67,.10);
+  font-size: 13px;
+}
+.delivery-image-account-picker__list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  max-height: 160px;
+  overflow-y: auto;
+  padding: 6px;
+  gap: 4px;
+}
+.delivery-image-account-option {
+  min-width: 0;
+  min-height: 36px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 7px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+.delivery-image-account-option:hover { background: rgba(10,132,255,.06); }
+.delivery-image-account-option span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.delivery-image-account-option em { color: #16833b; font-size: 11px; font-style: normal; }
+.delivery-image-account-option.is-disabled { opacity: .5; cursor: not-allowed; }
+.delivery-image-account-option.is-disabled em { color: #8e8e93; }
+.delivery-image-account-picker__empty { display: block; padding: 12px; color: #8e8e93; font-size: 12px; }
+.delivery-image-list { display: grid; gap: 8px; }
+.delivery-image-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid rgba(60,60,67,.12);
+  border-radius: 8px;
+  background: rgba(60,60,67,.025);
+}
+.delivery-image-item--legacy { border-style: dashed; }
+.delivery-image-item span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.delivery-image-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.delivery-image-item small { color: #8e8e93; font-size: 11px; }
+.delivery-image-control__preview {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border: 1px solid rgba(60,60,67,.14);
+  border-radius: 8px;
+  background: rgba(60,60,67,.05);
+}
+@media (max-width: 640px) {
+  .delivery-image-account-picker__list { grid-template-columns: 1fr; }
+  .delivery-message-preview__item { grid-template-columns: 1fr; gap: 3px; }
+  .delivery-message-step__actions { align-items: flex-start; flex-direction: column; }
+}
+.delivery-template-guide {
+  width: 100%;
+  padding: 11px;
+  border: 1px solid rgba(10,132,255,.16);
+  border-radius: 10px;
+  background: rgba(10,132,255,.035);
+  box-sizing: border-box;
+}
+.delivery-template-guide__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 9px;
+  color: #1c1c1e;
+  font-size: 12px;
+}
+.delivery-template-guide__head span {
+  color: rgba(28,28,30,.5);
+  font-weight: 400;
+}
+.delivery-template-guide__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+.delivery-template-variable {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid rgba(60,60,67,.1);
+  border-radius: 8px;
+  background: rgba(255,255,255,.72);
+  color: #1c1c1e;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color .15s ease, background .15s ease, transform .15s ease;
+}
+.delivery-template-variable:hover {
+  border-color: rgba(10,132,255,.42);
+  background: #fff;
+  transform: translateY(-1px);
+}
+.delivery-template-variable:focus-visible {
+  outline: 2px solid rgba(10,132,255,.32);
+  outline-offset: 1px;
+}
+.delivery-template-variable__top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.delivery-template-variable__top code {
+  flex: 0 0 auto;
+  padding: 1px 4px;
+  font-size: 11px;
+}
+.delivery-template-variable__top b {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 600;
+}
+.delivery-template-variable__top em {
+  margin-left: auto;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(255,159,10,.13);
+  color: #a46100;
+  font-size: 10px;
+  font-style: normal;
+  white-space: nowrap;
+}
+.delivery-template-variable small {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: rgba(28,28,30,.56);
+  font-size: 11px;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.delivery-flow__heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.delivery-flow__heading > div { display: grid; gap: 4px; }
+.delivery-flow__heading strong { color: #1c1c1e; font-size: 15px; }
+.delivery-flow__heading span { color: rgba(28,28,30,.56); font-size: 12px; }
+.delivery-flow__count {
+  flex: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(48,209,88,.10);
+  color: #1b7b3b !important;
+  font-weight: 600;
+}
+.delivery-flow__preview {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 1px 1px 12px;
+}
+.delivery-flow__preview-item {
+  position: relative;
+  min-width: 132px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr);
+  align-items: center;
+  gap: 1px 7px;
+  padding: 9px 10px;
+  border: 1px solid rgba(10,132,255,.20);
+  border-radius: 8px;
+  background: rgba(10,132,255,.045);
+}
+.delivery-flow__preview-item:not(:last-child)::after {
+  content: '›';
+  position: absolute;
+  right: -7px;
+  z-index: 1;
+  color: rgba(28,28,30,.42);
+  font-size: 17px;
+}
+.delivery-flow__preview-item b {
+  grid-row: 1 / 3;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: #0a84ff;
+  color: #fff;
+  font-size: 12px;
+}
+.delivery-flow__preview-item span { color: #1c1c1e; font-size: 12px; font-weight: 600; white-space: nowrap; }
+.delivery-flow__preview-item em { color: rgba(28,28,30,.50); font-size: 11px; font-style: normal; white-space: nowrap; }
+.delivery-flow__preview-item.is-disabled { border-color: rgba(60,60,67,.12); background: rgba(60,60,67,.035); }
+.delivery-flow__preview-item.is-disabled b { background: #a2a2a8; }
+.delivery-message-step {
+  padding: 16px 0;
+  border-top: 1px solid rgba(60,60,67,.10);
+}
+.delivery-message-step:last-child { padding-bottom: 0; }
+.delivery-message-step__head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 12px;
+}
+.delivery-message-step__head > div { display: grid; gap: 2px; }
+.delivery-message-step__head strong { color: #1c1c1e; font-size: 13px; }
+.delivery-message-step__head small { color: rgba(28,28,30,.52); font-size: 11px; }
+.delivery-message-step__number {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  border-radius: 50%;
+  background: #1c1c1e;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+}
+.delivery-message-step__textarea { width: 100%; box-sizing: border-box; }
+.delivery-message-step__actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 9px;
+}
+.delivery-message-step__actions span,
+.delivery-message-step__hint { color: rgba(28,28,30,.55); font-size: 12px; }
+.delivery-message-step__hint { margin: 10px 0; line-height: 1.55; }
+.delivery-message-preview { display: grid; gap: 7px; margin-top: 10px; }
+.delivery-message-preview__item {
+  display: grid;
+  grid-template-columns: 160px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px 10px;
+  border-left: 3px solid #30a857;
+  background: rgba(48,209,88,.055);
+}
+.delivery-message-preview__item span { color: #24773d; font-size: 11px; font-weight: 600; }
+.delivery-message-preview__item p { margin: 0; overflow: hidden; color: #303036; font-size: 12px; line-height: 1.5; text-overflow: ellipsis; white-space: pre-line; }
+
+.related-goods__warning {
+  padding: 10px 12px;
+  border-radius: 9px;
+  background: rgba(255,159,10,.10);
+  color: #8d5d00;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.related-goods__grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  height: min(52vh, 480px);
+  min-height: 360px;
+  border: 1px solid rgba(60,60,67,.12);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.related-goods__column {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background: rgba(255,255,255,.35);
+}
+
+.related-goods__column + .related-goods__column {
+  border-left: 1px solid rgba(60,60,67,.12);
+}
+
+.related-goods__column--selected { background: rgba(48,209,88,.035); }
+.related-goods__column-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  min-height: 48px;
+  padding: 8px 12px;
+  border-bottom: 1px solid rgba(60,60,67,.08);
+  color: #1c1c1e;
+  font-size: 13px;
+}
+.related-goods__column-head > div { display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.related-goods__column-head span { color: #30a857; font-size: 12px; white-space: nowrap; }
+.related-goods__column-head .btn-text:disabled { opacity: .4; cursor: not-allowed; }
+.related-goods__filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 128px;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid rgba(60,60,67,.08);
+}
+.related-goods .related-goods__search {
+  width: 100%;
+  height: 36px;
+  min-height: 36px;
+  flex: 0 0 36px;
+}
+.related-goods__account-filter { width: 100%; min-width: 0; height: 36px; }
+.related-goods__list {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.related-goods__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-top: 1px solid rgba(60,60,67,.08);
+  cursor: pointer;
+}
+.related-goods__item:hover { background: rgba(10,132,255,.045); }
+.related-goods__item:has(input:checked) { background: rgba(10,132,255,.07); }
+.related-goods__item input { flex: none; margin: 0; }
+.related-goods__cover {
+  width: 38px;
+  height: 38px;
+  flex: none;
+  border-radius: 8px;
+  object-fit: cover;
+  background: rgba(60,60,67,.08);
+}
+.related-goods__cover--empty { display: inline-flex; align-items: center; justify-content: center; color: rgba(28,28,30,.45); font-size: 10px; }
+.related-goods__info { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.related-goods__info strong, .related-goods__selected-item strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; color: #1c1c1e; }
+.related-goods__info small, .related-goods__selected-item small { color: rgba(28,28,30,.52); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.related-goods__info small b, .related-goods__selected-item small b { color: #0a6fc2; font-weight: 650; }
+.related-goods__info em { color: #e58600; font-size: 11px; font-style: normal; }
+.related-goods__selected-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 12px;
+  border-top: 1px solid rgba(60,60,67,.08);
+}
+.related-goods__selected-item > span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.related-goods__empty { display: flex; flex: 1; min-height: 100px; align-items: center; justify-content: center; color: rgba(28,28,30,.45); font-size: 13px; padding: 16px; text-align: center; }
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 20px;
+  flex-shrink: 0;
+}
+
+.modal-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: #1c1c1e;
+  margin: 0;
+}
+
+.modal-close {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+  border: none;
+  background: transparent;
+  color: rgba(28,28,30,.55);
+  font-size: 18px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.modal-close:hover {
+  background: rgba(60,60,67,.12);
+  color: #1c1c1e;
+}
+
+.modal-body {
+  padding: 0 20px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.modal-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 12px 20px;
+  flex-shrink: 0;
+}
+
+.form-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.form-label {
+  font-size: 13px;
+  color: #1c1c1e;
+  font-weight: 500;
+  min-width: 70px;
+  flex-shrink: 0;
+}
+
+.form-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid rgba(60,60,67,.12);
+  border-radius: 8px;
+  font-size: 13px;
+  background: rgba(255,255,255,0.55);
+  color: #1c1c1e;
+  transition: border-color 0.15s ease;
+  box-sizing: border-box;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: #0A84FF;
+}
+
+.form-input--num {
+  width: 100px;
+  flex: none;
+}
+
+.form-textarea {
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid rgba(60,60,67,.12);
+  border-radius: 10px;
+  font-size: 13px;
+  line-height: 1.5;
+  resize: vertical;
+  background: rgba(255,255,255,0.55);
+  color: #1c1c1e;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+.form-textarea:focus {
+  outline: none;
+  border-color: #0A84FF;
+}
+
+.form-hint {
+  font-size: 12px;
+  color: rgba(28,28,30,.55);
+  margin: 0;
+}
+
+.form-hint--indent {
+  margin-left: 70px;
+}
+
+.form-suffix {
+  font-size: 12px;
+  color: rgba(28,28,30,.55);
+}
+
+.form-switch {
+  position: relative;
+  display: inline-block;
+  width: 40px;
+  height: 24px;
+  cursor: pointer;
+}
+
+.form-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.form-switch-track {
+  position: absolute;
+  inset: 0;
+  background: #e5e5e5;
+  border-radius: 12px;
+  transition: background 0.2s ease;
+}
+
+.form-switch-track::after {
+  content: '';
+  position: absolute;
+  width: 20px;
+  height: 20px;
+  left: 2px;
+  top: 2px;
+  background: rgba(255,255,255,0.55);
+  border-radius: 50%;
+  transition: transform 0.2s ease;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.form-switch input:checked + .form-switch-track {
+  background: #30D158;
+}
+
+.form-switch input:checked + .form-switch-track::after {
+  transform: translateX(16px);
+}
+
+.form-radio-group {
+  display: flex;
+  gap: 12px;
+}
+
+.form-radio {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 13px;
+  color: #1c1c1e;
+  cursor: pointer;
+}
+
+.form-radio input {
+  margin: 0;
+}
+
+.form-checkbox-group {
+  display: flex;
+  gap: 16px;
+}
+
+.form-checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #1c1c1e;
+  cursor: pointer;
+}
+
+.form-checkbox input {
+  margin: 0;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 18px;
+  border-radius: 100px;
+  font-size: 13px;
+  font-weight: 590;
+  cursor: pointer;
+  transition: opacity .15s, transform .12s, box-shadow .15s;
+  border: none;
+  font-family: inherit;
+  user-select: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.btn:active { opacity: .80; transform: scale(.96); }
+
+.btn-secondary {
+  color: #0A84FF;
+  background: rgba(255,255,255,0.70);
+  backdrop-filter: blur(16px) saturate(1.6);
+  -webkit-backdrop-filter: blur(16px) saturate(1.6);
+  border: 1px solid rgba(255,255,255,0.85);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.08), 0 1.5px 4px rgba(0,0,0,0.04);
+}
+
+@media (hover: hover) {
+  .btn-secondary:hover {
+    background: rgba(255,255,255,0.80);
+  }
+}
+
+.btn-primary {
+  background: rgba(10,132,255,0.85);
+  backdrop-filter: blur(20px) saturate(1.8);
+  -webkit-backdrop-filter: blur(20px) saturate(1.8);
+  color: #fff;
+  border: 1px solid rgba(255,255,255,0.35);
+  box-shadow: 0 4px 16px rgba(10,132,255,0.35), 0 8px 32px rgba(0,0,0,0.08), 0 1.5px 4px rgba(0,0,0,0.04);
+}
+
+@media (hover: hover) {
+  .btn-primary:hover:not(:disabled) {
+    background: rgba(10,132,255,0.95);
+    box-shadow: 0 6px 20px rgba(10,132,255,0.45), 0 8px 32px rgba(0,0,0,0.08), 0 1.5px 4px rgba(0,0,0,0.04);
+  }
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn.is-loading {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+/* Transitions */
+.modal-enter-active,
+.modal-leave-active {
+  transition: opacity 0.2s ease;
+}
+
+.modal-enter-active .modal-container,
+.modal-leave-active .modal-container {
+  transition: transform 0.3s cubic-bezier(0.32, 0.94, 0.6, 1), opacity 0.2s ease;
+}
+
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+
+.modal-enter-from .modal-container,
+.modal-leave-to .modal-container {
+  transform: scale(0.92) translateY(8px);
+  opacity: 0;
+}
+
+.btn-primary, .btn-default, .btn-success, .btn-warning, .btn-danger, .btn-text {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 8px 16px;
+  border-radius: 100px;
+  font-size: 13px;
+  font-weight: 590;
+  cursor: pointer;
+  transition: opacity .15s, transform .12s;
+  border: none;
+  font-family: inherit;
+  user-select: none;
+  white-space: nowrap;
+}
+.btn-primary:active, .btn-default:active, .btn-success:active, .btn-warning:active, .btn-danger:active { opacity: .80; transform: scale(.96); }
+.btn-primary { background: rgba(10,132,255,0.85); color: #fff; border: 1px solid rgba(255,255,255,0.35); box-shadow: 0 4px 16px rgba(10,132,255,0.35), 0 8px 32px rgba(0,0,0,0.08); }
+.btn-default { background: rgba(255,255,255,0.70); color: #0A84FF; border: 1px solid rgba(255,255,255,0.85); box-shadow: 0 8px 32px rgba(0,0,0,0.08); }
+.btn-success { background: rgba(48,209,88,0.85); color: #fff; border: 1px solid rgba(255,255,255,0.35); }
+.btn-warning { background: rgba(255,159,10,0.85); color: #fff; border: 1px solid rgba(255,255,255,0.35); }
+.btn-danger { color: #FF453A; background: rgba(255,69,58,0.15); border: 1px solid rgba(255,69,58,0.2); }
+.btn-text { background: transparent; color: #0A84FF; padding: 4px 8px; }
+.btn-sm { padding: 4px 12px; font-size: 12px; }
+.btn-primary:disabled, .btn-default:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.tag { display: inline-flex; align-items: center; padding: 2px 10px; border-radius: 100px; font-size: 12px; font-weight: 500; }
+.tag--success { background: rgba(48,209,88,0.12); color: #30D158; }
+.tag--warning { background: rgba(255,159,10,0.12); color: #FF9F0A; }
+.tag--info { background: rgba(120,120,128,0.12); color: rgba(28,28,30,.55); }
+
+.native-select {
+  padding: 8px 12px;
+  border: 1px solid rgba(60,60,67,.12);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.55);
+  color: #1c1c1e;
+  font-size: 13px;
+  outline: none;
+  cursor: pointer;
+  font-family: inherit;
+}
+.native-select:focus { border-color: #0A84FF; }
+
+.native-input {
+  padding: 8px 12px;
+  border: 1px solid rgba(60,60,67,.12);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.55);
+  color: #1c1c1e;
+  font-size: 13px;
+  outline: none;
+  font-family: inherit;
+  box-sizing: border-box;
+}
+.native-input:focus { border-color: #0A84FF; }
+
+.kami-batch-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: 12px;
+}
+
+.kami-batch-actions__select {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: #4b5565;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.kami-batch-actions__count {
+  color: #667085;
+  font-size: 12px;
+}
+
+.kami-table__cell--select {
+  width: 34px;
+  text-align: center;
+}
+
+.kami-table__cell--select input {
+  cursor: pointer;
+}
+
+.kami-table__cell--select input:disabled {
+  cursor: not-allowed;
+}
+@media (max-width: 700px) {
+  .modal-overlay { padding: 10px; }
+  .modal-container--wide { max-height: 92vh; }
+  .related-goods__grid { grid-template-columns: 1fr; height: auto; min-height: 0; overflow-y: auto; }
+  .related-goods__column { max-height: 36vh; min-height: 240px; }
+  .related-goods__column + .related-goods__column { border-left: none; border-top: 1px solid rgba(60,60,67,.12); }
+  .related-goods__filters { grid-template-columns: 1fr; }
+  .delivery-template-guide { width: 100%; }
+  .delivery-template-guide__head { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .delivery-template-guide__grid { grid-template-columns: 1fr; }
+}
+</style>

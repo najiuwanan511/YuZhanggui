@@ -1,0 +1,12 @@
+package com.yuzhanggui.controller.dto;
+
+import lombok.Data;
+
+/** 商品默认回复配置响应。 */
+@Data
+public class ProductDefaultReplyConfigRespDTO {
+    private Integer productDefaultReplyOn = 0;
+    private Integer productDefaultReplyMode = 1;
+    private String productDefaultReplyText;
+    private String productDefaultReplyImageUrl;
+}

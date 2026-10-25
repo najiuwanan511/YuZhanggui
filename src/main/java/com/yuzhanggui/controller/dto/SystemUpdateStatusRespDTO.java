@@ -1,0 +1,31 @@
+package com.yuzhanggui.controller.dto;
+
+import lombok.Data;
+
+import java.util.ArrayList;
+import java.util.List;
+
+/**
+ * GitHub 更新检查结果。
+ */
+@Data
+public class SystemUpdateStatusRespDTO {
+
+    /** 是否可用当前镜像中的提交标识与远端比较。 */
+    private boolean versionTracked;
+
+    /** 是否发现可以安装的 GitHub 正式版本。 */
+    private boolean updateAvailable;
+
+    /** 面向界面的简短状态说明。 */
+    private String message;
+
+    private String currentCommit;
+    private String latestCommit;
+    private String currentVersion;
+    private String latestVersion;
+    private String latestMessage;
+    private List<String> updateHighlights = new ArrayList<>();
+    private String updateUrl;
+    private String checkedAt;
+}

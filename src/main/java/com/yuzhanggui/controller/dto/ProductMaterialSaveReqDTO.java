@@ -1,0 +1,25 @@
+package com.yuzhanggui.controller.dto;
+
+import lombok.Data;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.List;
+
+@Data
+public class ProductMaterialSaveReqDTO {
+    private Long id;
+    private Long sourceAccountId;
+    private String sourceGoodsId;
+    private String materialName;
+    private String title;
+    private String description;
+    private BigDecimal price;
+    private BigDecimal originalPrice;
+    private Integer quantity = 1;
+    private String skuPropertyName;
+    private List<ProductPublishReqDTO.SkuSpec> skuSpecs = new ArrayList<>();
+    private String deliveryMode = "FREE";
+    private BigDecimal postFee;
+    private List<ProductPublishReqDTO.Image> images = new ArrayList<>();
+}

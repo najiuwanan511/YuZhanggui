@@ -1,0 +1,38 @@
+package com.yuzhanggui.controller.dto;
+
+import lombok.Data;
+
+/**
+ * 获取自动发货记录请求DTO
+ */
+@Data
+public class AutoDeliveryRecordReqDTO {
+    
+    /**
+     * 闲鱼账号ID
+     */
+    private Long xianyuAccountId;
+    
+    /**
+     * 商品ID（可选，不传则查询所有商品）
+     */
+    private String xyGoodsId;
+
+    /** 发货状态：0-待处理，-1-失败，1-已发货。 */
+    private Integer orderStatus;
+    
+    /**
+     * 模糊搜索关键词，匹配商品名称、规格、买家、发货内容
+     */
+    private String keyword;
+    
+    /**
+     * 页码
+     */
+    private Integer pageNum = 1;
+    
+    /**
+     * 每页数量
+     */
+    private Integer pageSize = 20;
+}

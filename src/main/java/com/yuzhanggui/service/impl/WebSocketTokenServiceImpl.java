@@ -1,0 +1,1127 @@
+package com.yuzhanggui.service.impl;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.update.LambdaUpdateWrapper;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yuzhanggui.entity.XianyuAccount;
+import com.yuzhanggui.entity.XianyuCookie;
+import com.yuzhanggui.exception.CaptchaRequiredException;
+import com.yuzhanggui.mapper.XianyuCookieMapper;
+
+import com.yuzhanggui.service.AccountService;
+import com.yuzhanggui.service.CookieRefreshService;
+import com.yuzhanggui.service.EmailNotifyService;
+import com.yuzhanggui.service.OperationLogService;
+import com.yuzhanggui.service.NotificationChannelService;
+import com.yuzhanggui.service.WebSocketTokenService;
+import com.yuzhanggui.utils.XianyuSignUtils;
+import lombok.extern.slf4j.Slf4j;
+import okhttp3.*;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Lazy;
+import org.springframework.stereotype.Service;
+
+import java.net.URI;
+import java.net.URLEncoder;
+import java.util.*;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+/**
+ * WebSocket Token服务实现
+ * 参考Python XianyuAutoAgent的get_token/hasLogin方法
+ *
+ * 核心逻辑（与Python完全对齐）：
+ * 1. 使用OkHttp发送token请求（而非RestTemplate），确保能正确获取Set-Cookie响应头
+ * 2. 模拟Python requests.Session的有状态Cookie管理：
+ *    - 每次请求前，从数据库读取Cookie构建请求头
+ *    - 每次请求后，从响应Set-Cookie中更新Cookie到数据库
+ *    - 重试时使用更新后的Cookie（新_m_h5_tk）
+ * 3. hasLogin刷新后，必须从数据库读取新Cookie，确保签名使用新_m_h5_tk
+ *
+ * 与Python的关键对应关系：
+ * - Python self.session.cookies → Java 从数据库读取/更新Cookie
+ * - Python self.session.post → Java OkHttp发送请求+手动管理Cookie
+ * - Python self.clear_duplicate_cookies → Java mergeCookies + clearDuplicateCookies
+ */
+@Slf4j
+@Service
+public class WebSocketTokenServiceImpl implements WebSocketTokenService {
+
+    @Autowired
+    private XianyuCookieMapper xianyuCookieMapper;
+
+    @Autowired
+    private com.yuzhanggui.mapper.XianyuAccountMapper xianyuAccountMapper;
+
+    @Autowired
+    private CookieRefreshService cookieRefreshService;
+
+    @Autowired
+    private AccountService accountService;
+
+    @Autowired
+    private OperationLogService operationLogService;
+
+    @Autowired
+    private CredentialUpdateCoordinator credentialUpdateCoordinator;
+
+    @Autowired
+    private EmailNotifyService emailNotifyService;
+
+    @Autowired(required = false)
+    private NotificationChannelService notificationChannelService;
+
+    @Autowired
+    @Qualifier("webSocketScheduler")
+    private java.util.concurrent.ScheduledExecutorService webSocketScheduler;
+
+    @Autowired
+    @Lazy
+    private com.yuzhanggui.service.WebSocketService webSocketService;
+
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    /**
+     * Token API地址
+     */
+    private static final String TOKEN_API_URL = "https://h5api.m.goofish.com/h5/mtop.taobao.idlemessage.pc.login.token/1.0/";
+
+    /**
+     * Token 有效期（20小时，参考 Python 的 TOKEN_REFRESH_INTERVAL）
+     */
+    private static final long TOKEN_VALID_DURATION = 20 * 60 * 60 * 1000; // 20小时
+
+    /**
+     * 记录正在等待验证的账号和验证URL
+     * Key: accountId, Value: captchaUrl
+     */
+    private final Map<Long, String> pendingCaptchaAccounts = new ConcurrentHashMap<>();
+
+    /**
+     * 记录验证URL的创建时间，用于超时清理
+     * Key: accountId, Value: timestamp
+     */
+    private final Map<Long, Long> captchaTimestamps = new ConcurrentHashMap<>();
+
+    /** Tracks the current verification episode so each account is notified only once. */
+    private final Map<Long, Long> captchaNotificationTimes = new ConcurrentHashMap<>();
+    private final Map<Long, String> captchaNotifiedUrls = new ConcurrentHashMap<>();
+
+    @Value("${app.captcha.remote-enabled:false}")
+    private boolean captchaRemoteEnabled;
+
+    @Value("${app.captcha.remote-port:7900}")
+    private int captchaRemotePort = 7900;
+
+    @Value("${app.captcha.remote-url:}")
+    private String captchaRemoteUrl = "";
+
+    /**
+     * Token获取失败重试最大次数（参考Python: retry_count >= 2）
+     */
+    private static final int MAX_TOKEN_RETRY_COUNT = 2;
+
+    /**
+     * Cookie过期时hasLogin重试最大次数
+     */
+    private static final int MAX_COOKIE_RETRY_COUNT = 2;
+
+    /** First recovery is prompt and coalesced; later failures use 5/15/30 minute backoff. */
+    private static final long[] SESSION_RENEWAL_RETRY_MINUTES = {5, 15, 30};
+
+    private final Map<Long, java.util.concurrent.ScheduledFuture<?>> sessionRenewalTasks = new ConcurrentHashMap<>();
+    private final Map<Long, WebSocketTokenService.RenewalStatus> renewalStatuses = new ConcurrentHashMap<>();
+
+    /**
+     * 重试间隔基础值（毫秒）
+     */
+    private static final long RETRY_INTERVAL_BASE = 500;
+
+    /**
+     * 重试间隔随机范围（毫秒）
+     */
+    private static final long RETRY_INTERVAL_RANDOM = 1000;
+
+
+    /**
+     * 共享的OkHttpClient（用于发送token API请求）
+     */
+    private final OkHttpClient httpClient = new OkHttpClient.Builder()
+            .connectTimeout(30, TimeUnit.SECONDS)
+            .readTimeout(60, TimeUnit.SECONDS)
+            .writeTimeout(30, TimeUnit.SECONDS)
+            .followRedirects(true)
+            .build();
+
+
+    @Override
+    public String getAccessToken(Long accountId) {
+        return credentialUpdateCoordinator.withAccountLock(accountId,
+                () -> getAccessTokenWithRetry(accountId, 0));
+    }
+
+    /**
+     * 从数据库获取最新的Cookie字符串
+     */
+    private String getLatestCookieFromDb(Long accountId) {
+        try {
+            XianyuCookie cookie = xianyuCookieMapper.selectOne(
+                    new LambdaQueryWrapper<XianyuCookie>()
+                            .eq(XianyuCookie::getXianyuAccountId, accountId)
+                            .orderByDesc(XianyuCookie::getCreatedTime)
+                            .last("LIMIT 1")
+            );
+            if (cookie != null && cookie.getCookieText() != null) {
+                return cookie.getCookieText();
+            }
+        } catch (Exception e) {
+            log.error("【账号{}】从数据库获取最新Cookie失败", accountId, e);
+        }
+        return null;
+    }
+
+    /**
+     * 获取AccessToken（带重试机制）
+     * 参考Python XianyuApis.get_token方法
+     *
+     * 核心改进（与Python对齐）：
+     * 1. 使用OkHttp发送请求，确保能正确获取Set-Cookie响应头
+     * 2. 每次重试都从数据库重新读取最新Cookie（可能已被Set-Cookie更新）
+     * 3. API失败后从响应Set-Cookie更新数据库Cookie，再重试（模拟Python session行为）
+     *
+     * @param accountId 账号ID
+     * @param retryCount 当前重试次数
+     * @return accessToken
+     */
+    private String getAccessTokenWithRetry(Long accountId, int retryCount) {
+        try {
+            // 0. 检查是否正在等待验证
+            if (pendingCaptchaAccounts.containsKey(accountId)) {
+                String captchaUrl = pendingCaptchaAccounts.get(accountId);
+                log.debug("【账号{}】正在等待人工安全验证，跳过重复请求", accountId);
+                throw new CaptchaRequiredException(captchaUrl);
+            }
+
+            // 1. 【关键】每次都从数据库重新读取最新Cookie
+            String cookiesStr = getLatestCookieFromDb(accountId);
+            if (cookiesStr == null || cookiesStr.isEmpty()) {
+                log.error("【账号{}】获取Cookie失败，无法获取Token", accountId);
+                return null;
+            }
+
+            // 2. 先从数据库检查是否有有效的 Token
+            XianyuCookie cookieEntity = xianyuCookieMapper.selectOne(
+                    new LambdaQueryWrapper<XianyuCookie>()
+                            .eq(XianyuCookie::getXianyuAccountId, accountId)
+            );
+
+            if (cookieEntity != null && cookieEntity.getWebsocketToken() != null
+                    && cookieEntity.getTokenExpireTime() != null) {
+                long now = System.currentTimeMillis();
+                if (cookieEntity.getTokenExpireTime() > now) {
+                    long remainingHours = (cookieEntity.getTokenExpireTime() - now) / (60 * 60 * 1000);
+                    log.info("【账号{}】使用数据库中的accessToken（剩余有效期: {}小时）",
+                            accountId, remainingHours);
+                    pendingCaptchaAccounts.remove(accountId);
+                    captchaTimestamps.remove(accountId);
+                    captchaNotificationTimes.remove(accountId);
+                    captchaNotifiedUrls.remove(accountId);
+                    return cookieEntity.getWebsocketToken();
+                } else {
+                    log.info("【账号{}】数据库中的Token已过期，需要重新获取", accountId);
+                }
+            }
+
+            log.info("【账号{}】开始获取新的accessToken... (重试次数: {})", accountId, retryCount);
+
+            // 3. 生成时间戳
+            String timestamp = String.valueOf(System.currentTimeMillis());
+
+            // 4. 使用数据库中最新的Cookie来解析_m_h5_tk
+            Map<String, String> cookies = XianyuSignUtils.parseCookies(cookiesStr);
+            String mh5tk = cookies.get("_m_h5_tk");
+            String token = "";
+            if (mh5tk != null && mh5tk.contains("_")) {
+                token = mh5tk.split("_")[0];
+            }
+            log.debug("【账号{}】签名Token状态: {}（值已隐藏）", accountId, token.isEmpty() ? "缺失" : "已加载");
+
+            // 5. 构建data参数
+            String deviceId = getDeviceId(accountId, cookies);
+            String dataVal = String.format("{\"appKey\":\"444e9908a51d1cb236a27862abc769c9\",\"deviceId\":\"%s\"}", deviceId);
+
+            // 6. 生成签名
+            String sign = XianyuSignUtils.generateSign(timestamp, token, dataVal);
+
+            // 7. 构建URL参数
+            StringBuilder urlBuilder = new StringBuilder(TOKEN_API_URL);
+            urlBuilder.append("?");
+            appendUrlParam(urlBuilder, "jsv", "2.7.2");
+            appendUrlParam(urlBuilder, "appKey", "34839810");
+            appendUrlParam(urlBuilder, "t", timestamp);
+            appendUrlParam(urlBuilder, "sign", sign);
+            appendUrlParam(urlBuilder, "v", "1.0");
+            appendUrlParam(urlBuilder, "type", "originaljson");
+            appendUrlParam(urlBuilder, "accountSite", "xianyu");
+            appendUrlParam(urlBuilder, "dataType", "json");
+            appendUrlParam(urlBuilder, "timeout", "20000");
+            appendUrlParam(urlBuilder, "api", "mtop.taobao.idlemessage.pc.login.token");
+            appendUrlParam(urlBuilder, "sessionOption", "AutoLoginOnly");
+            appendUrlParam(urlBuilder, "spm_cnt", "a21ybx.im.0.0");
+            appendUrlParam(urlBuilder, "spm_pre", "a21ybx.item.want.1.14ad3da6ALVq3n");
+            appendUrlParam(urlBuilder, "log_id", "14ad3da6ALVq3n");
+            String fullUrl = urlBuilder.toString();
+            if (fullUrl.endsWith("&")) {
+                fullUrl = fullUrl.substring(0, fullUrl.length() - 1);
+            }
+
+            // 8. 构建请求体（application/x-www-form-urlencoded）
+            String formData = "data=" + URLEncoder.encode(dataVal, "UTF-8");
+
+            // 9. 构建请求头
+            Request.Builder requestBuilder = new Request.Builder()
+                    .url(fullUrl)
+                    .post(RequestBody.create(formData, MediaType.parse("application/x-www-form-urlencoded")))
+                    .header("Host", "h5api.m.goofish.com")
+                    .header("sec-ch-ua-platform", "\"Windows\"")
+                    .header("user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36")
+                    .header("accept", "application/json")
+                    .header("sec-ch-ua", "\"Chromium\";v=\"146\", \"Not-A.Brand\";v=\"24\", \"Google Chrome\";v=\"146\"")
+                    .header("sec-ch-ua-mobile", "?0")
+                    .header("origin", "https://www.goofish.com")
+                    .header("sec-fetch-site", "same-site")
+                    .header("sec-fetch-mode", "cors")
+                    .header("sec-fetch-dest", "empty")
+                    .header("referer", "https://www.goofish.com/")
+                    .header("accept-language", "en,zh-CN;q=0.9,zh;q=0.8,zh-TW;q=0.7,ja;q=0.6")
+                    .header("priority", "u=1, i")
+                    .header("Cookie", cookiesStr);
+
+            log.info("【账号{}】正在请求新的WebSocket accessToken（签名与请求参数已隐藏）", accountId);
+
+            // 10. 发送请求（OkHttp能正确返回Set-Cookie头）
+            try (Response httpResponse = httpClient.newCall(requestBuilder.build()).execute()) {
+                if (!httpResponse.isSuccessful()) {
+                    log.error("【账号{}】获取accessToken失败：HTTP {}", accountId, httpResponse.code());
+                    return handleTokenFailure(accountId, retryCount, null, "HTTP " + httpResponse.code());
+                }
+
+                String responseBody = httpResponse.body() != null ? httpResponse.body().string() : "";
+
+                // 【关键改进】处理响应中的Set-Cookie（参考Python: session自动处理 + clear_duplicate_cookies）
+                // OkHttp能正确返回Set-Cookie头，这是与RestTemplate的关键区别
+                Headers responseHeaders = httpResponse.headers();
+                List<String> setCookieHeaders = responseHeaders.values("Set-Cookie");
+
+                if (!setCookieHeaders.isEmpty()) {
+                    log.info("【账号{}】检测到响应中的Set-Cookie，数量: {}", accountId, setCookieHeaders.size());
+                    String updatedCookieStr = updateCookiesFromResponse(accountId, cookiesStr, setCookieHeaders);
+                    if (updatedCookieStr != null && !updatedCookieStr.equals(cookiesStr)) {
+                        log.info("【账号{}】Cookie已从响应Set-Cookie中更新，_m_h5_tk可能已更新", accountId);
+                    } else {
+                        log.info("【账号{}】Set-Cookie未改变Cookie内容", accountId);
+                    }
+                } else {
+                    log.info("【账号{}】响应中无Set-Cookie", accountId);
+                }
+
+                log.debug("【账号{}】WebSocket Token接口已返回响应（响应内容不写入日志）", accountId);
+
+                if (responseBody == null || responseBody.isEmpty()) {
+                    log.error("【账号{}】获取accessToken失败：响应为空", accountId);
+                    return handleTokenFailure(accountId, retryCount, null, "响应为空");
+                }
+
+                // 11. 解析响应
+                @SuppressWarnings("unchecked")
+                Map<String, Object> responseMap = objectMapper.readValue(responseBody, Map.class);
+
+                // 检查ret字段
+                Object retObj = responseMap.get("ret");
+                if (retObj instanceof java.util.List) {
+                    @SuppressWarnings("unchecked")
+                    java.util.List<String> retList = (java.util.List<String>) retObj;
+                    log.info("【账号{}】ret字段内容: {}", accountId, retList);
+
+                    boolean success = retList.stream().anyMatch(ret -> ret.contains("SUCCESS::调用成功"));
+
+                    if (success) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> dataMap = (Map<String, Object>) responseMap.get("data");
+                        if (dataMap != null && dataMap.containsKey("accessToken")) {
+                            String accessToken = (String) dataMap.get("accessToken");
+
+                            // 保存 token 到数据库
+                            saveTokenToDatabase(accountId, accessToken);
+
+                            log.info("【账号{}】accessToken获取成功并已保存到数据库", accountId);
+
+                            operationLogService.log(accountId,
+                                com.yuzhanggui.constants.OperationConstants.Type.REFRESH,
+                                com.yuzhanggui.constants.OperationConstants.Module.TOKEN,
+                                "WebSocket Token获取成功",
+                                com.yuzhanggui.constants.OperationConstants.Status.SUCCESS,
+                                com.yuzhanggui.constants.OperationConstants.TargetType.TOKEN,
+                                String.valueOf(accountId),
+                                null, null, null, null);
+
+                            return accessToken;
+                        }
+                    }
+
+                    // 检查是否需要滑块验证
+                    boolean needCaptcha = retList.stream().anyMatch(ret -> ret.contains("FAIL_SYS_USER_VALIDATE"));
+                    log.info("【账号{}】是否需要滑块验证: {}", accountId, needCaptcha);
+
+                    if (needCaptcha) {
+                        @SuppressWarnings("unchecked")
+                        Map<String, Object> dataMap = (Map<String, Object>) responseMap.get("data");
+                        log.debug("【账号{}】Token接口已返回安全验证信息", accountId);
+
+                        if (dataMap != null && dataMap.containsKey("url")) {
+                            String captchaUrl = (String) dataMap.get("url");
+
+                            // 仅首次风控响应自动尝试该账号自己的浏览器 Context。
+                            // 验证成功后回写 x5sec，并在同一账号锁内重新取 Token；
+                            // 再次失败则进入人工等待，避免验证失败时形成请求风暴。
+                            if (retryCount == 0 && cookieRefreshService.completeCaptcha(accountId, captchaUrl)) {
+                                log.info("【账号{}】浏览器安全验证已完成，清除旧 Token 后重试", accountId);
+                                clearCaptchaWait(accountId);
+                                clearToken(accountId);
+                                return getAccessTokenWithRetry(accountId, retryCount + 1);
+                            }
+
+                            rememberCaptchaRequirement(accountId, captchaUrl, "获取WebSocket Token时平台要求安全验证");
+                            throw new CaptchaRequiredException(getCaptchaUrl(accountId));
+                        } else {
+                            log.error("【账号{}】需要滑块验证但未找到URL", accountId);
+                        }
+                    }
+
+                    // 检查是否触发风控（RGV587_ERROR）
+                    boolean needRiskControl = retList.stream().anyMatch(ret -> ret.contains("RGV587_ERROR") || ret.contains("被挤爆啦"));
+                    if (needRiskControl) {
+                        log.error("【账号{}】❌ 触发风控（响应内容已隐藏）", accountId);
+                        rememberCaptchaRequirement(accountId, null, "平台返回风险验证");
+                        throw new CaptchaRequiredException(getCaptchaUrl(accountId));
+                    }
+                }
+
+                log.error("【账号{}】获取accessToken失败：接口未返回可用Token（响应内容已隐藏）", accountId);
+
+                // Token获取失败，进入失败处理流程
+                return handleTokenFailure(accountId, retryCount, responseBody, "Token API调用失败");
+            }
+
+        } catch (CaptchaRequiredException e) {
+            throw e;
+        } catch (com.yuzhanggui.exception.CookieExpiredException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("【账号{}】获取accessToken异常", accountId, e);
+            return null;
+        }
+    }
+
+    /**
+     * URL参数追加辅助方法
+     */
+    private void appendUrlParam(StringBuilder sb, String key, String value) {
+        try {
+            sb.append(key).append("=").append(URLEncoder.encode(value, "UTF-8")).append("&");
+        } catch (Exception e) {
+            log.error("URL编码失败: key={}", key, e);
+        }
+    }
+
+    /**
+     * 获取设备ID
+     */
+    private String getDeviceId(Long accountId, Map<String, String> cookies) {
+        com.yuzhanggui.entity.XianyuAccount account = xianyuAccountMapper.selectById(accountId);
+        if (account != null && account.getDeviceId() != null) {
+            return account.getDeviceId();
+        }
+        String unb = cookies.get("unb");
+        if (unb != null) {
+            return accountService.getOrGenerateDeviceId(accountId, unb);
+        }
+        return "device_" + accountId;
+    }
+
+    /**
+     * 处理Token获取失败的情况
+     * 参考Python XianyuApis.get_token的失败处理逻辑：
+     *
+     * Python逻辑：
+     * 1. 非SUCCESS时，先检查响应Set-Cookie并更新cookies（clear_duplicate_cookies）
+     * 2. retry_count < 2时，直接重试（此时session已有新cookie）
+     * 3. retry_count >= 2时，调用hasLogin刷新Cookie，成功后重置retry_count重新获取token
+     * 4. 检测风控（RGV587_ERROR或"被挤爆啦"），提示用户手动处理
+     */
+    private String handleTokenFailure(Long accountId, int retryCount, String response, String reason) {
+
+        // 检测风控（参考Python实现）
+        boolean isRiskControl = response != null && (
+            response.contains("RGV587_ERROR") ||
+            response.contains("被挤爆啦") ||
+            response.contains("FAIL_SYS_RGV587_ERROR"));
+
+        if (isRiskControl) {
+            log.error("【账号{}】❌ 触发风控（响应内容已隐藏）", accountId);
+            log.error("【账号{}】系统目前无法自动解决，请进入闲鱼网页版-点击消息-过滑块-复制最新的Cookie", accountId);
+            
+            rememberCaptchaRequirement(accountId, null, "Token获取时触发平台风险验证");
+            throw new CaptchaRequiredException(getCaptchaUrl(accountId));
+        }
+
+        boolean isSessionExpired = response != null && (
+            response.contains("FAIL_SYS_SESSION_EXPIRED") ||
+            response.contains("FAIL_SYS_TOKEN_EXOIRED") ||
+            response.contains("FAIL_SYS_TOKEN_EXPIRED") ||
+            response.contains("令牌过期"));
+
+        if (isSessionExpired) {
+            scheduleSessionExpiryRenewal(accountId);
+            throw new com.yuzhanggui.exception.CookieExpiredException(
+                    "Session已过期，正在准备自动续期");
+        }
+
+        if (retryCount < MAX_TOKEN_RETRY_COUNT) {
+            log.warn("【账号{}】Token获取失败({})，准备重试... (重试次数: {}/{})",
+                    accountId, reason, retryCount + 1, MAX_TOKEN_RETRY_COUNT);
+
+            try {
+                long randomInterval = RETRY_INTERVAL_BASE + new java.util.Random().nextLong(RETRY_INTERVAL_RANDOM);
+                Thread.sleep(randomInterval);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+            }
+
+            return getAccessTokenWithRetry(accountId, retryCount + 1);
+        }
+
+        log.warn("【账号{}】Token获取重试已达上限，尝试通过hasLogin刷新Cookie...", accountId);
+        return refreshTokenViaHasLogin(accountId, 0);
+    }
+
+    /**
+     * 通过hasLogin刷新Cookie后重新获取Token
+     * 参考Python: get_token中retry_count >= 2时的逻辑
+     *
+     * Python逻辑：
+     * if retry_count >= 2:
+     *     if self.hasLogin():  # hasLogin会自动更新session cookies
+     *         return self.get_token(device_id, 0)  # 重置重试次数
+     *     else:
+     *         sys.exit(1)  # Cookie彻底失效
+     */
+    private String refreshTokenViaHasLogin(Long accountId, int hasLoginRetryCount) {
+        if (hasLoginRetryCount >= MAX_COOKIE_RETRY_COUNT) {
+            log.error("【账号{}】hasLogin刷新重试次数已达上限，Cookie已彻底过期，无法自动续期", accountId);
+            // 确认无法自动续期后，才标记为过期并触发邮件通知
+            updateCookieStatus(accountId, 2, true);
+
+            operationLogService.log(accountId,
+                com.yuzhanggui.constants.OperationConstants.Type.REFRESH,
+                com.yuzhanggui.constants.OperationConstants.Module.TOKEN,
+                "WebSocket Token获取失败：Cookie过期且自动刷新失败",
+                com.yuzhanggui.constants.OperationConstants.Status.FAIL,
+                com.yuzhanggui.constants.OperationConstants.TargetType.TOKEN,
+                String.valueOf(accountId),
+                null, null, "Cookie过期且自动刷新失败", null);
+
+            throw new com.yuzhanggui.exception.CookieExpiredException(
+                    "Cookie已过期且自动刷新失败，请手动更新Cookie后重试");
+        }
+
+        log.info("【账号{}】开始通过hasLogin刷新Cookie... (重试次数: {}/{})",
+                accountId, hasLoginRetryCount, MAX_COOKIE_RETRY_COUNT);
+
+        try {
+            // 调用hasLogin刷新Cookie（参考Python的hasLogin方法）
+            boolean refreshSuccess = cookieRefreshService.refreshCookie(accountId);
+
+            if (refreshSuccess) {
+                log.info("【账号{}】hasLogin成功，登录态有效，准备重新获取Token（重置重试计数）", accountId);
+
+                try {
+                    // 随机间隔500-1500ms，避免固定间隔被识别为机器人
+                    long randomInterval = RETRY_INTERVAL_BASE + new java.util.Random().nextLong(RETRY_INTERVAL_RANDOM);
+                    Thread.sleep(randomInterval);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                }
+
+                // hasLogin成功后从数据库读取最新Cookie
+                String newCookieStr = getLatestCookieFromDb(accountId);
+                if (newCookieStr != null && !newCookieStr.isEmpty()) {
+                    log.info("【账号{}】hasLogin后已读取最新Cookie，长度: {}（敏感值已隐藏）",
+                            accountId, newCookieStr.length());
+                    // 重置retryCount为0，重新开始获取token流程
+                    return getAccessTokenWithRetry(accountId, 0);
+                } else {
+                    log.error("【账号{}】hasLogin后获取刷新后的Cookie失败", accountId);
+                }
+            } else {
+                log.warn("【账号{}】hasLogin失败", accountId);
+            }
+        } catch (CaptchaRequiredException e) {
+            log.warn("【账号{}】hasLogin后重新获取Token时触发滑块验证，停止自动重试，等待人工处理", accountId);
+            throw e;
+        } catch (com.yuzhanggui.exception.CookieExpiredException e) {
+            throw e;
+        } catch (Exception e) {
+            log.error("【账号{}】hasLogin刷新过程发生异常", accountId, e);
+        }
+
+        // hasLogin失败，重试
+        return refreshTokenViaHasLogin(accountId, hasLoginRetryCount + 1);
+    }
+
+    /**
+     * 从响应的Set-Cookie中更新Cookie
+     * 参考Python: requests.Session自动处理Set-Cookie + clear_duplicate_cookies
+     *
+     * 关键：token API在返回FAIL_SYS_SESSION_EXPIRED时，响应的Set-Cookie中会包含新的_m_h5_tk
+     * Python的requests.Session会自动保存这些Cookie，所以下次请求时签名是正确的
+     * Java需要手动处理，并且必须确保Set-Cookie头能被正确读取（OkHttp可以）
+     *
+     * @param accountId 账号ID
+     * @param currentCookieStr 当前Cookie字符串
+     * @param setCookieHeaders 响应中的Set-Cookie列表
+     * @return 更新后的Cookie字符串
+     */
+    private String updateCookiesFromResponse(Long accountId, String currentCookieStr, List<String> setCookieHeaders) {
+        try {
+            // 只记录Set-Cookie字段数量和目标字段是否存在，禁止输出任何Cookie值。
+            for (int i = 0; i < setCookieHeaders.size(); i++) {
+                String setCookie = setCookieHeaders.get(i);
+                if (setCookie.contains("_m_h5_tk")) {
+                    log.info("【账号{}】Set-Cookie中包含_m_h5_tk（值已隐藏）", accountId);
+                } else {
+                    log.debug("【账号{}】已接收Set-Cookie[{}]（值已隐藏）", accountId, i);
+                }
+            }
+
+            String newCookieStr = mergeCookies(currentCookieStr, setCookieHeaders);
+
+            // 清理重复Cookie
+            newCookieStr = cookieRefreshService.clearDuplicateCookies(newCookieStr);
+
+            // 检查是否有新的_m_h5_tk
+            Map<String, String> oldCookies = XianyuSignUtils.parseCookies(currentCookieStr);
+            Map<String, String> newCookies = XianyuSignUtils.parseCookies(newCookieStr);
+
+            String oldMh5tk = oldCookies.get("_m_h5_tk");
+            String newMh5tk = newCookies.get("_m_h5_tk");
+
+            boolean mh5tkUpdated = (newMh5tk != null && !newMh5tk.equals(oldMh5tk));
+            if (mh5tkUpdated) {
+                log.info("【账号{}】✅ _m_h5_tk已从响应中更新（值已隐藏）", accountId);
+            } else {
+                log.info("【账号{}】_m_h5_tk未变化（可能Set-Cookie中没有新的_m_h5_tk）", accountId);
+            }
+
+            // 更新数据库中的Cookie
+            if (!newCookieStr.equals(currentCookieStr)) {
+                xianyuCookieMapper.update(null,
+                        new LambdaUpdateWrapper<XianyuCookie>()
+                                .eq(XianyuCookie::getXianyuAccountId, accountId)
+                                .set(XianyuCookie::getCookieText, newCookieStr)
+                                .set(XianyuCookie::getCookieStatus, 1)
+                );
+
+                // 如果_m_h5_tk更新了，也更新mH5Tk字段
+                if (mh5tkUpdated && newMh5tk != null) {
+                    xianyuCookieMapper.update(null,
+                            new LambdaUpdateWrapper<XianyuCookie>()
+                                    .eq(XianyuCookie::getXianyuAccountId, accountId)
+                                    .set(XianyuCookie::getMH5Tk, newMh5tk)
+                    );
+                }
+
+                log.info("【账号{}】Cookie已从响应Set-Cookie更新到数据库", accountId);
+            }
+
+            return newCookieStr;
+        } catch (Exception e) {
+            log.error("【账号{}】处理响应Set-Cookie失败", accountId, e);
+            return currentCookieStr;
+        }
+    }
+
+    /**
+     * 合并Cookie（新Cookie覆盖旧Cookie）
+     * 模拟Python requests.Session自动处理Set-Cookie的行为
+     */
+    private String mergeCookies(String oldCookieStr, List<String> newCookies) {
+        Map<String, String> cookies = new LinkedHashMap<>();
+
+        // 解析旧Cookie
+        if (oldCookieStr != null && !oldCookieStr.isEmpty()) {
+            String[] parts = oldCookieStr.split(";\\s*");
+            for (String part : parts) {
+                int idx = part.indexOf('=');
+                if (idx > 0) {
+                    String key = part.substring(0, idx);
+                    String value = part.substring(idx + 1);
+                    cookies.put(key, value);
+                }
+            }
+        }
+
+        // 解析新Cookie（Set-Cookie格式: name=value; Path=/; Domain=.goofish.com; ...）
+        for (String newCookie : newCookies) {
+            // 只提取第一个name=value对（Set-Cookie头中后面的属性如Path、Domain等不是Cookie值）
+            Pattern pattern = Pattern.compile("^\\s*([^=;\\s]+)=([^;]*)");
+            Matcher matcher = pattern.matcher(newCookie);
+            if (matcher.find()) {
+                String key = matcher.group(1).trim();
+                String value = matcher.group(2).trim();
+                // 跳过删除Cookie（值为空）
+                if (!value.isEmpty()) {
+                    cookies.put(key, value);
+                } else {
+                    cookies.remove(key);
+                }
+            }
+        }
+
+        // 重新构建Cookie字符串
+        StringBuilder sb = new StringBuilder();
+        for (Map.Entry<String, String> entry : cookies.entrySet()) {
+            if (sb.length() > 0) {
+                sb.append("; ");
+            }
+            sb.append(entry.getKey()).append("=").append(entry.getValue());
+        }
+
+        return sb.toString();
+    }
+
+    @Override
+    public void saveToken(Long accountId, String token) {
+        credentialUpdateCoordinator.withAccountLock(accountId, () -> saveTokenToDatabase(accountId, token));
+    }
+
+    @Override
+    public void clearToken(Long accountId) {
+        try {
+            log.info("【账号{}】清除数据库中的Token缓存", accountId);
+
+            xianyuCookieMapper.clearWebSocketTokenExpiry(accountId);
+
+            log.info("【账号{}】Token缓存已清除", accountId);
+        } catch (Exception e) {
+            log.error("【账号{}】清除Token缓存失败", accountId, e);
+        }
+    }
+
+    @Override
+    public void clearCaptchaWait(Long accountId) {
+        log.info("【账号{}】清除验证等待状态", accountId);
+        pendingCaptchaAccounts.remove(accountId);
+        captchaTimestamps.remove(accountId);
+        captchaNotificationTimes.remove(accountId);
+        captchaNotifiedUrls.remove(accountId);
+        updateRenewalStatus(accountId, "IDLE", "验证等待已清除，可重新刷新并连接", null);
+        log.info("【账号{}】验证等待状态已清除", accountId);
+    }
+
+    @Override
+    public void clearAccountRuntimeState(Long accountId) {
+        if (accountId == null) return;
+        java.util.concurrent.ScheduledFuture<?> renewalTask = sessionRenewalTasks.remove(accountId);
+        if (renewalTask != null) {
+            renewalTask.cancel(false);
+        }
+        pendingCaptchaAccounts.remove(accountId);
+        captchaTimestamps.remove(accountId);
+        captchaNotificationTimes.remove(accountId);
+        captchaNotifiedUrls.remove(accountId);
+        renewalStatuses.remove(accountId);
+        log.info("Account {} token renewal and verification runtime state cleared", accountId);
+    }
+
+    @Override
+    public Long getTokenExpireTime(Long accountId) {
+        if (accountId == null) return null;
+        XianyuCookie cookie = xianyuCookieMapper.selectOne(
+                new LambdaQueryWrapper<XianyuCookie>()
+                        .eq(XianyuCookie::getXianyuAccountId, accountId)
+                        .orderByDesc(XianyuCookie::getCreatedTime)
+                        .last("LIMIT 1")
+        );
+        return cookie == null ? null : cookie.getTokenExpireTime();
+    }
+
+    @Override
+    public boolean isCaptchaPending(Long accountId) {
+        return accountId != null && pendingCaptchaAccounts.containsKey(accountId);
+    }
+
+    @Override
+    public void pauseForVerification(Long accountId, String captchaUrl, String reason) {
+        if (accountId == null) return;
+        rememberCaptchaRequirement(accountId, captchaUrl,
+                reason == null || reason.isBlank() ? "平台要求安全验证" : reason);
+    }
+
+    @Override
+    public String getCaptchaUrl(Long accountId) {
+        String url = accountId == null ? null : pendingCaptchaAccounts.get(accountId);
+        return url == null || url.isBlank() ? null : url;
+    }
+
+    @Override
+    public boolean isSessionRenewalPending(Long accountId) {
+        java.util.concurrent.ScheduledFuture<?> task = accountId == null ? null : sessionRenewalTasks.get(accountId);
+        return task != null && !task.isDone() && !task.isCancelled();
+    }
+
+    private void scheduleSessionExpiryRenewal(Long accountId) {
+        scheduleSessionExpiryRenewal(accountId, 0);
+    }
+
+    private void scheduleSessionExpiryRenewal(Long accountId, int attempt) {
+        sessionRenewalTasks.compute(accountId, (id, existingTask) -> {
+            if (existingTask != null && !existingTask.isDone() && !existingTask.isCancelled()) {
+                log.info("【账号{}】Session续期任务已存在，跳过重复请求", id);
+                return existingTask;
+            }
+
+            long delaySeconds = attempt == 0
+                    ? java.util.concurrent.ThreadLocalRandom.current().nextLong(3, 9)
+                    : TimeUnit.MINUTES.toSeconds(SESSION_RENEWAL_RETRY_MINUTES[Math.min(attempt - 1,
+                    SESSION_RENEWAL_RETRY_MINUTES.length - 1)]);
+            long nextRetryAt = System.currentTimeMillis() + TimeUnit.SECONDS.toMillis(delaySeconds);
+            String state = attempt == 0 ? "REFRESH_PENDING" : "RETRY_WAIT";
+            String message = attempt == 0
+                    ? "Session已过期，正在准备自动续期"
+                    : "自动续期失败，将按退避时间再次尝试";
+            updateRenewalStatus(id, state, message, nextRetryAt);
+
+            operationLogService.log(id,
+                    com.yuzhanggui.constants.OperationConstants.Type.REFRESH,
+                    com.yuzhanggui.constants.OperationConstants.Module.TOKEN,
+                    attempt == 0 ? "Session过期，准备立即自动续期" : "Session续期失败，已安排退避重试",
+                    com.yuzhanggui.constants.OperationConstants.Status.PARTIAL,
+                    com.yuzhanggui.constants.OperationConstants.TargetType.TOKEN,
+                    String.valueOf(id), null, null, message, null);
+
+            return webSocketScheduler.schedule(() -> runSessionRenewal(id, attempt), delaySeconds, TimeUnit.SECONDS);
+        });
+    }
+
+    private void runSessionRenewal(Long accountId, int attempt) {
+        boolean shouldRetry = false;
+        try {
+            XianyuAccount account = xianyuAccountMapper.selectById(accountId);
+            if (account == null || !Integer.valueOf(1).equals(account.getStatus())) {
+                log.info("Account {} is inactive; session renewal cancelled", accountId);
+                return;
+            }
+
+            updateRenewalStatus(accountId, "REFRESHING_COOKIE", "正在刷新Cookie登录态", null);
+            boolean cookieRefreshed = cookieRefreshService.refreshCookie(accountId);
+            if (!cookieRefreshed) {
+                shouldRetry = true;
+                updateRenewalStatus(accountId, "REFRESH_FAILED", "Cookie自动续期失败", null);
+                return;
+            }
+
+            updateRenewalStatus(accountId, "REFRESHING_TOKEN", "Cookie已刷新，正在获取WebSocket Token", null);
+            clearToken(accountId);
+            updateRenewalStatus(accountId, "RECONNECTING", "Token刷新完成后正在重新连接", null);
+            boolean connected = webSocketService.startWebSocket(accountId);
+            if (connected) {
+                updateRenewalStatus(accountId, "SUCCESS", "WebSocket Token已续期并重新连接", null);
+                operationLogService.log(accountId,
+                        com.yuzhanggui.constants.OperationConstants.Type.CONNECT,
+                        com.yuzhanggui.constants.OperationConstants.Module.TOKEN,
+                        "WebSocket Token续期并重连成功",
+                        com.yuzhanggui.constants.OperationConstants.Status.SUCCESS,
+                        com.yuzhanggui.constants.OperationConstants.TargetType.TOKEN,
+                        String.valueOf(accountId), null, null, null, null);
+            } else if (isCaptchaPending(accountId)) {
+                updateRenewalStatus(accountId, "VERIFICATION_REQUIRED", "平台要求安全验证，自动重试已停止", null);
+            } else {
+                shouldRetry = true;
+                updateRenewalStatus(accountId, "RECONNECT_FAILED", "Token续期后重新连接失败", null);
+            }
+        } catch (CaptchaRequiredException exception) {
+            updateRenewalStatus(accountId, "VERIFICATION_REQUIRED", "平台要求安全验证，自动重试已停止", null);
+        } catch (Exception exception) {
+            shouldRetry = true;
+            updateRenewalStatus(accountId, "REFRESH_FAILED", "自动续期异常：" + exception.getMessage(), null);
+            log.error("【账号{}】Session过期后的自动续期异常", accountId, exception);
+        } finally {
+            sessionRenewalTasks.remove(accountId);
+            if (shouldRetry && !isCaptchaPending(accountId)) {
+                int nextAttempt = attempt + 1;
+                if (nextAttempt <= SESSION_RENEWAL_RETRY_MINUTES.length) {
+                    scheduleSessionExpiryRenewal(accountId, nextAttempt);
+                } else {
+                    updateRenewalStatus(accountId, "REFRESH_FAILED", "自动续期重试已结束，请手动刷新并重连", null);
+                }
+            }
+        }
+    }
+
+    private void updateRenewalStatus(Long accountId, String state, String message, Long nextRetryAt) {
+        if (accountId == null) return;
+        renewalStatuses.put(accountId, new WebSocketTokenService.RenewalStatus(
+                state, message, System.currentTimeMillis(), nextRetryAt));
+    }
+
+    @Override
+    public WebSocketTokenService.RenewalStatus getRenewalStatus(Long accountId) {
+        return renewalStatuses.getOrDefault(accountId, WebSocketTokenService.RenewalStatus.idle());
+    }
+
+    /**
+     * 刷新WebSocket token
+     */
+    @Override
+    public String refreshToken(Long accountId) {
+        return credentialUpdateCoordinator.withAccountLock(accountId, () -> {
+            try {
+                log.info("【账号{}】开始刷新WebSocket token...", accountId);
+                updateRenewalStatus(accountId, "REFRESHING_TOKEN", "正在获取新的WebSocket Token", null);
+
+                // 1. 清除旧token，强制重新获取
+                clearToken(accountId);
+
+                // 2. 获取新token
+                String newToken = getAccessTokenWithRetry(accountId, 0);
+
+                if (newToken != null && !newToken.isEmpty()) {
+                    log.info("【账号{}】✅ WebSocket token刷新成功", accountId);
+                    updateRenewalStatus(accountId, "SUCCESS", "WebSocket Token刷新成功", null);
+                    return newToken;
+                } else {
+                    log.warn("【账号{}】⚠️ WebSocket token刷新失败", accountId);
+                    updateRenewalStatus(accountId, "REFRESH_FAILED", "WebSocket Token刷新失败", null);
+                    return null;
+                }
+
+            } catch (CaptchaRequiredException e) {
+                updateRenewalStatus(accountId, "VERIFICATION_REQUIRED", "平台要求安全验证，自动重试已停止", null);
+                throw e;
+            } catch (com.yuzhanggui.exception.CookieExpiredException e) {
+                throw e;
+            } catch (Exception e) {
+                log.error("【账号{}】刷新WebSocket token异常", accountId, e);
+                return null;
+            }
+        });
+    }
+
+    private void rememberCaptchaRequirement(Long accountId, String captchaUrl, String reason) {
+        String storedUrl = normalizeCaptchaUrl(captchaUrl);
+        String previous = pendingCaptchaAccounts.putIfAbsent(accountId, storedUrl);
+        if (previous != null && !storedUrl.isBlank()) {
+            pendingCaptchaAccounts.put(accountId, storedUrl);
+        }
+        captchaTimestamps.put(accountId, System.currentTimeMillis());
+        updateRenewalStatus(accountId, "VERIFICATION_REQUIRED",
+                "平台要求安全验证；已停止自动刷新与重连", null);
+        boolean accountEnteredCaptchaState = updateAccountStatusToCaptchaRequired(accountId);
+        boolean newVerificationEpisode = previous == null && accountEnteredCaptchaState;
+
+        try {
+            webSocketService.stopWebSocket(accountId);
+        } catch (Exception exception) {
+            log.debug("【账号{}】暂停WebSocket任务时连接已停止: {}", accountId, exception.getMessage());
+        }
+
+        if (newVerificationEpisode) {
+            operationLogService.log(accountId,
+                    com.yuzhanggui.constants.OperationConstants.Type.REFRESH,
+                    com.yuzhanggui.constants.OperationConstants.Module.TOKEN,
+                    "WebSocket Token需要安全验证，自动请求已暂停",
+                    com.yuzhanggui.constants.OperationConstants.Status.PARTIAL,
+                    com.yuzhanggui.constants.OperationConstants.TargetType.TOKEN,
+                    String.valueOf(accountId), null, null, reason, null);
+        }
+        captchaNotifiedUrls.compute(accountId, (id, lastNotifiedUrl) -> {
+            // Persisted status=-2 after restart, or a challenge without a URL, still needs a first alert.
+            boolean first = !captchaNotificationTimes.containsKey(id);
+            boolean refreshed = !storedUrl.isBlank() && !storedUrl.equals(lastNotifiedUrl);
+            if (first || refreshed) {
+                if (notifyCaptchaRequired(id, reason)) {
+                    captchaNotificationTimes.put(id, System.currentTimeMillis());
+                    return storedUrl;
+                }
+            }
+            return lastNotifiedUrl;
+        });
+        if (newVerificationEpisode) {
+            log.warn("【账号{}】需要安全验证，已暂停Token刷新和WebSocket重连", accountId);
+        } else {
+            log.debug("【账号{}】安全验证仍未完成，保持暂停状态", accountId);
+        }
+    }
+
+    private String normalizeCaptchaUrl(String captchaUrl) {
+        if (captchaUrl == null || captchaUrl.isBlank()) return "";
+        try {
+            URI uri = URI.create(captchaUrl.trim());
+            String host = uri.getHost() == null ? "" : uri.getHost().toLowerCase(Locale.ROOT);
+            boolean trustedHost = host.equals("goofish.com") || host.endsWith(".goofish.com")
+                    || host.equals("taobao.com") || host.endsWith(".taobao.com")
+                    || host.equals("alibaba.com") || host.endsWith(".alibaba.com");
+            if ("https".equalsIgnoreCase(uri.getScheme()) && trustedHost) {
+                return uri.toString();
+            }
+        } catch (Exception exception) {
+            log.warn("【账号验证】平台返回的验证地址格式异常: {}", exception.getMessage());
+        }
+        log.warn("忽略非官方域名的安全验证地址");
+        return "";
+    }
+
+    private boolean notifyCaptchaRequired(Long accountId, String reason) {
+        if (notificationChannelService == null) return false;
+        try {
+            java.util.Map<String, Object> params = new java.util.HashMap<>();
+            params.put("credentialType", "WebSocket Token");
+            params.put("reason", reason);
+            String remoteLocation = captchaRemoteUrl == null || captchaRemoteUrl.isBlank()
+                    ? "服务器 " + captchaRemotePort + " 端口的 /vnc.html" : captchaRemoteUrl;
+            params.put("action", captchaRemoteEnabled
+                    ? "请先在账号管理发起远程验证，再打开 VNC 远程浏览器（" + remoteLocation
+                        + "），在该账号验证窗口内完成滑块；验证通过后系统会尝试恢复连接。请勿反复扫码或直接打开过期验证链接。"
+                    : "账号需要完成滑块验证。请在账号管理配置 VNC 远程验证，或使用对应账号浏览器登录 https://www.goofish.com/im 完成验证后更新Cookie。");
+            notificationChannelService.dispatchMessage("CREDENTIAL_UPDATE_REQUIRED", accountId, params);
+            return true;
+        } catch (Exception exception) {
+            log.warn("【账号{}】安全验证通知发送失败: {}", accountId, exception.getMessage());
+            return false;
+        }
+    }
+
+    /**
+     * 更新账号状态为需要验证（-2）
+     */
+    private boolean updateAccountStatusToCaptchaRequired(Long accountId) {
+        try {
+            com.yuzhanggui.entity.XianyuAccount account = xianyuAccountMapper.selectById(accountId);
+            if (account == null) {
+                return false;
+            }
+            if (Integer.valueOf(0).equals(account.getStatus())) {
+                log.info("Account {} is disabled; captcha state ignored", accountId);
+                return false;
+            }
+            if (Integer.valueOf(-2).equals(account.getStatus())) {
+                return false;
+            }
+            account.setStatus(-2);
+            xianyuAccountMapper.updateById(account);
+            log.info("【账号{}】账号状态已更新为-2（需要验证）", accountId);
+            return true;
+        } catch (Exception e) {
+            log.error("【账号{}】更新账号状态失败", accountId, e);
+            return true;
+        }
+    }
+
+    /**
+     * 更新Cookie状态
+     * @param accountId 账号ID
+     * @param status Cookie状态
+     */
+    private void updateCookieStatus(Long accountId, Integer status) {
+        updateCookieStatus(accountId, status, false);
+    }
+
+    /**
+     * 更新Cookie状态
+     * @param accountId 账号ID
+     * @param status Cookie状态
+     * @param sendNotify 是否发送邮件通知（仅当确认无法自动续期时才为true）
+     */
+    private void updateCookieStatus(Long accountId, Integer status, boolean sendNotify) {
+        try {
+            XianyuCookie currentCookie = xianyuCookieMapper.selectOne(
+                    new LambdaQueryWrapper<XianyuCookie>()
+                            .eq(XianyuCookie::getXianyuAccountId, accountId)
+                            .orderByDesc(XianyuCookie::getCreatedTime)
+                            .last("LIMIT 1")
+            );
+            Integer oldStatus = currentCookie != null ? currentCookie.getCookieStatus() : null;
+
+            xianyuCookieMapper.update(null,
+                    new LambdaUpdateWrapper<XianyuCookie>()
+                            .eq(XianyuCookie::getXianyuAccountId, accountId)
+                            .set(XianyuCookie::getCookieStatus, status)
+            );
+            String statusText = status == 2 ? "过期" : status == 3 ? "失效" : "未知";
+            log.info("【账号{}】Cookie状态已更新为{}({})", accountId, status, statusText);
+
+            // 只有在明确指定发送通知时才发送邮件（即确认无法自动续期后）
+            if (sendNotify && Objects.equals(status, 2) && !Objects.equals(oldStatus, 2)) {
+                XianyuAccount account = xianyuAccountMapper.selectById(accountId);
+                String accountNote = account != null ? account.getAccountNote() : null;
+                log.info("【账号{}】Cookie已确认无法自动续期，触发Cookie过期通知流程", accountId);
+                notifyCredentialUpdateRequired(accountId);
+                if (emailNotifyService != null) emailNotifyService.sendCookieExpireNotifyEmail(accountId, accountNote);
+            } else if (Objects.equals(status, 2) && !Objects.equals(oldStatus, 2)) {
+                log.info("【账号{}】Cookie被标记为过期，但系统将尝试自动续期，暂不发送邮件通知", accountId);
+            }
+        } catch (Exception e) {
+            log.error("【账号{}】更新Cookie状态失败", accountId, e);
+        }
+    }
+
+    private void notifyCredentialUpdateRequired(Long accountId) {
+        if (notificationChannelService == null) return;
+        try {
+            java.util.Map<String, Object> params = new java.util.HashMap<>();
+            params.put("credentialType", "Cookie / WebSocket Token");
+            params.put("reason", "Cookie 已过期且自动刷新失败");
+            params.put("action", "请打开账号管理，执行凭证更新或重新扫码登录");
+            notificationChannelService.dispatchMessage("CREDENTIAL_UPDATE_REQUIRED", accountId, params);
+        } catch (Exception exception) {
+            log.warn("【账号{}】凭证更新通知发送失败: {}", accountId, exception.getMessage());
+        }
+    }
+
+    /**
+     * 保存 Token 到数据库
+     */
+    private void saveTokenToDatabase(Long accountId, String token) {
+        try {
+            long expireTime = System.currentTimeMillis() + TOKEN_VALID_DURATION;
+
+            int updated = xianyuCookieMapper.update(null,
+                    new LambdaUpdateWrapper<XianyuCookie>()
+                            .eq(XianyuCookie::getXianyuAccountId, accountId)
+                            .set(XianyuCookie::getWebsocketToken, token)
+                            .set(XianyuCookie::getTokenExpireTime, expireTime)
+            );
+
+            if (updated > 0) {
+                pendingCaptchaAccounts.remove(accountId);
+                captchaTimestamps.remove(accountId);
+                captchaNotificationTimes.remove(accountId);
+                captchaNotifiedUrls.remove(accountId);
+                updateRenewalStatus(accountId, "SUCCESS", "WebSocket Token已刷新", null);
+                log.info("【账号{}】Token已保存到数据库，过期时间: {}", accountId,
+                        new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss")
+                                .format(new java.util.Date(expireTime)));
+            } else {
+                log.warn("【账号{}】Token保存失败，未找到对应的Cookie记录", accountId);
+            }
+        } catch (Exception e) {
+            log.error("【账号{}】保存Token到数据库失败", accountId, e);
+        }
+    }
+}

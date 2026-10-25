@@ -1,0 +1,10 @@
+package com.yuzhanggui.service;
+
+import com.baomidou.mybatisplus.extension.service.IService;
+import com.yuzhanggui.entity.SysNotificationChannel;
+
+public interface NotificationChannelService extends IService<SysNotificationChannel> {
+    void dispatchMessage(String eventType, Long accountId, java.util.Map<String, Object> params);
+    boolean dispatchMessageSync(String eventType, Long accountId, java.util.Map<String, Object> params);
+    void sendTestMessage(String type, String configJson) throws Exception;
+}

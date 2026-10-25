@@ -1,0 +1,375 @@
+package com.yuzhanggui.service.impl;
+
+import com.yuzhanggui.controller.dto.ProductPublishReqDTO;
+import com.yuzhanggui.controller.dto.ProductPublishRespDTO;
+import com.yuzhanggui.controller.dto.PublishCapabilityCheckRespDTO;
+import com.yuzhanggui.exception.BusinessException;
+import com.yuzhanggui.service.AccountService;
+import com.yuzhanggui.service.PublishCapabilityProbeService;
+import com.yuzhanggui.utils.XianyuApiCallUtils;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
+import org.mockito.Mock;
+import org.mockito.MockitoAnnotations;
+
+import java.math.BigDecimal;
+import java.util.List;
+import java.util.Map;
+import java.util.UUID;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class ProductPublishServiceImplTest {
+    @Mock private PublishCapabilityProbeService probeService;
+    @Mock private AccountService accountService;
+    @Mock private XianyuApiCallUtils apiCallUtils;
+
+    private ProductPublishServiceImpl service;
+
+    @BeforeEach
+    void setUp() {
+        MockitoAnnotations.openMocks(this);
+        service = new ProductPublishServiceImpl(probeService, accountService, apiCallUtils);
+    }
+
+    @Test
+    void shouldRevalidateSchemaAndPublishGeneralProduct() {
+        ProductPublishReqDTO request = request();
+        PublishCapabilityCheckRespDTO schema = generalSchema();
+        when(probeService.check(eq(7L), eq(request.getTitle()), eq(request.getDescription()),
+                any(List.class), any(List.class))).thenReturn(schema);
+        when(accountService.getCookieByAccountId(7L)).thenReturn("_m_h5_tk=token_exp");
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(PublishCapabilityProbeService.LOCATION_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"commonAddresses\":[{\"area\":\"浦东\",\"city\":\"上海\",\"divisionId\":\"310115\",\"longitude\":121.5,\"latitude\":31.2,\"poiId\":\"1\",\"poi\":\"上海\",\"prov\":\"上海\"}]}}",
+                        null, false));
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"itemId\":\"987654\"}}", null, false));
+
+        ProductPublishRespDTO response = service.publish(request);
+
+        assertTrue(response.isSuccess());
+        assertEquals("987654", response.getItemId());
+        ArgumentCaptor<Map<String, Object>> payload = ArgumentCaptor.forClass(Map.class);
+        verify(apiCallUtils).callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), payload.capture(),
+                any(String.class), eq("1.0"), eq(null), eq(null));
+        assertEquals("100", ((Map<?, ?>) payload.getValue().get("itemPriceDTO")).get("priceInCent"));
+        assertEquals(1, ((List<?>) payload.getValue().get("imageInfoDOList")).size());
+        assertEquals(1, ((List<?>) payload.getValue().get("itemLabelExtList")).size());
+    }
+
+    @Test
+    void shouldPublishEachSpecificationAsAPlatformSku() {
+        ProductPublishReqDTO request = request();
+        request.setPrice(null);
+        request.setQuantity(null);
+        request.setSkuPropertyName("套餐");
+        request.setSkuSpecs(List.of(sku("月卡", "2.50", 2), sku("年卡", "1.00", 1)));
+        when(probeService.check(eq(7L), eq(request.getTitle()), eq(request.getDescription()),
+                any(List.class), any(List.class))).thenReturn(generalSchema());
+        when(accountService.getCookieByAccountId(7L)).thenReturn("_m_h5_tk=token_exp");
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(PublishCapabilityProbeService.LOCATION_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"commonAddresses\":[{\"divisionId\":\"310115\",\"city\":\"上海\"}]}}",
+                        null, false));
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"itemId\":\"sku-1\"}}", null, false));
+
+        service.publish(request);
+
+        ArgumentCaptor<Map<String, Object>> payload = ArgumentCaptor.forClass(Map.class);
+        verify(apiCallUtils).callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), payload.capture(),
+                any(String.class), eq("1.0"), eq(null), eq(null));
+        assertEquals("100", ((Map<?, ?>) payload.getValue().get("itemPriceDTO")).get("priceInCent"));
+        assertEquals("3", payload.getValue().get("quantity"));
+        List<?> skus = (List<?>) payload.getValue().get("itemSkuList");
+        assertEquals(2, skus.size());
+        Map<?, ?> firstSku = (Map<?, ?>) skus.get(0);
+        assertEquals("250", firstSku.get("priceInCent"));
+        assertEquals("2", firstSku.get("quantity"));
+        Map<?, ?> property = (Map<?, ?>) ((List<?>) firstSku.get("propertyList")).get(0);
+        assertEquals("套餐", property.get("propertyText"));
+        assertEquals("月卡", property.get("valueText"));
+    }
+
+    @Test
+    void shouldRejectDuplicateSpecificationBeforeAnyNetworkCall() {
+        ProductPublishReqDTO request = request();
+        request.setSkuPropertyName("套餐");
+        request.setSkuSpecs(List.of(sku("月卡", "1.00", 1), sku(" 月卡 ", "2.00", 1)));
+
+        BusinessException exception = assertThrows(BusinessException.class, () -> service.publish(request));
+
+        assertTrue(exception.getMessage().contains("不能重复"));
+        verify(probeService, never()).check(any(), any());
+    }
+
+    @Test
+    void shouldRejectSpecialCategoryBeforePublishApi() {
+        ProductPublishReqDTO request = request();
+        PublishCapabilityCheckRespDTO schema = generalSchema();
+        schema.setSupportLevel("SPECIAL_ADAPTER");
+        schema.setSupportLabel("需要专项适配");
+        when(probeService.check(eq(7L), eq(request.getTitle()), eq(request.getDescription()),
+                any(List.class), any(List.class))).thenReturn(schema);
+
+        BusinessException exception = assertThrows(BusinessException.class, () -> service.publish(request));
+
+        assertTrue(exception.getMessage().contains("专项流程"));
+        verify(apiCallUtils, never()).callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API),
+                any(Map.class), any(String.class), any(String.class), any(), any());
+    }
+
+    @Test
+    void shouldPublishAssistServiceWithReturnedServiceFields() {
+        ProductPublishReqDTO request = request();
+        request.setTitle("书亦烧仙草拼单助力服务");
+        request.setProperties(List.of(
+                selection("delivery-period", "10m"),
+                selection("service-type", "assist"),
+                selection("pricing", "unit")));
+        PublishCapabilityCheckRespDTO schema = assistServiceSchema();
+        when(probeService.check(eq(7L), eq(request.getTitle()), eq(request.getDescription()),
+                any(List.class), any(List.class))).thenReturn(schema);
+        when(accountService.getCookieByAccountId(7L)).thenReturn("_m_h5_tk=token_exp");
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(PublishCapabilityProbeService.LOCATION_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"commonAddresses\":[{\"divisionId\":\"310115\",\"city\":\"上海\"}]}}",
+                        null, false));
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"itemId\":\"service-1\"}}", null, false));
+
+        ProductPublishRespDTO response = service.publish(request);
+
+        assertTrue(response.isSuccess());
+        ArgumentCaptor<Map<String, Object>> payload = ArgumentCaptor.forClass(Map.class);
+        verify(apiCallUtils).callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), payload.capture(),
+                any(String.class), eq("1.0"), eq(null), eq(null));
+        List<?> labels = (List<?>) payload.getValue().get("itemLabelExtList");
+        assertEquals(3, labels.size());
+    }
+
+    @Test
+    void shouldAllowOptionalDependentServicePropertyToRemainEmpty() {
+        ProductPublishReqDTO request = request();
+        request.setTitle("书亦烧仙草拼单助力服务");
+        request.setProperties(List.of(
+                selection("delivery-period", "10m"),
+                selection("service-type", "assist"),
+                selection("pricing", "unit")));
+        PublishCapabilityCheckRespDTO schema = assistServiceSchema();
+        PublishCapabilityCheckRespDTO.Property optionalRegion = new PublishCapabilityCheckRespDTO.Property();
+        optionalRegion.setPropertyId("service-region");
+        optionalRegion.setPropertyName("服务区域");
+        optionalRegion.setRequired(false);
+        optionalRegion.setDependent(true);
+        schema.setProperties(List.of(
+                serviceProperty("delivery-period", "交付周期", "10m", "10分钟"),
+                serviceProperty("service-type", "服务类型", "assist", "助力"),
+                serviceProperty("pricing", "计价方式", "unit", "元/次"),
+                optionalRegion));
+        schema.setDependentPropertyCount(1);
+        when(probeService.check(eq(7L), eq(request.getTitle()), eq(request.getDescription()),
+                any(List.class), any(List.class))).thenReturn(schema);
+        when(accountService.getCookieByAccountId(7L)).thenReturn("_m_h5_tk=token_exp");
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(PublishCapabilityProbeService.LOCATION_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"commonAddresses\":[{\"divisionId\":\"310115\",\"city\":\"上海\"}]}}",
+                        null, false));
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"itemId\":\"service-optional-1\"}}", null, false));
+
+        ProductPublishRespDTO response = service.publish(request);
+
+        assertTrue(response.isSuccess());
+        assertEquals("service-optional-1", response.getItemId());
+        ArgumentCaptor<Map<String, Object>> payload = ArgumentCaptor.forClass(Map.class);
+        verify(apiCallUtils).callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), payload.capture(),
+                any(String.class), eq("1.0"), eq(null), eq(null));
+        assertEquals(3, ((List<?>) payload.getValue().get("itemLabelExtList")).size());
+    }
+
+    @Test
+    void shouldStillRejectRequiredDependentProperty() {
+        ProductPublishReqDTO request = request();
+        PublishCapabilityCheckRespDTO schema = generalSchema();
+        PublishCapabilityCheckRespDTO.Property requiredDependent = new PublishCapabilityCheckRespDTO.Property();
+        requiredDependent.setPropertyId("model");
+        requiredDependent.setPropertyName("型号");
+        requiredDependent.setRequired(true);
+        requiredDependent.setDependent(true);
+        schema.setProperties(List.of(requiredDependent));
+        schema.setDependentPropertyCount(1);
+        when(probeService.check(eq(7L), eq(request.getTitle()), eq(request.getDescription()),
+                any(List.class), any(List.class))).thenReturn(schema);
+
+        BusinessException exception = assertThrows(BusinessException.class, () -> service.publish(request));
+
+        assertTrue(exception.getMessage().contains("必填联动属性"));
+        verify(apiCallUtils, never()).callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API),
+                any(Map.class), any(String.class), any(String.class), any(), any());
+    }
+
+    @Test
+    void shouldPublishWithSelectedPoiWhenCommonAddressesAreMissing() {
+        ProductPublishReqDTO request = request();
+        ProductPublishReqDTO.Address addressRequest = new ProductPublishReqDTO.Address();
+        addressRequest.setLocationKey("310115|poi-1|121.5|31.2");
+        addressRequest.setLookupLongitude(121.5);
+        addressRequest.setLookupLatitude(31.2);
+        addressRequest.setCustomPoiName("张江自提点");
+        request.setAddress(addressRequest);
+        when(probeService.check(eq(7L), eq(request.getTitle()), eq(request.getDescription()),
+                any(List.class), any(List.class))).thenReturn(generalSchema());
+        when(accountService.getCookieByAccountId(7L)).thenReturn("_m_h5_tk=token_exp");
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(PublishCapabilityProbeService.LOCATION_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"selectedPoi\":{\"districtName\":\"浦东\",\"cityName\":\"上海\",\"adCode\":\"310115\",\"gps\":\"121.5,31.2\",\"id\":\"poi-1\",\"name\":\"上海\",\"provinceName\":\"上海\"}}}",
+                        null, false));
+        when(apiCallUtils.callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), any(Map.class),
+                any(String.class), eq("1.0"), eq(null), eq(null)))
+                .thenReturn(new XianyuApiCallUtils.ApiCallResult(true,
+                        "{\"ret\":[\"SUCCESS\"],\"data\":{\"itemId\":\"123\"}}", null, false));
+
+        ProductPublishRespDTO response = service.publish(request);
+
+        assertEquals("123", response.getItemId());
+        ArgumentCaptor<Map<String, Object>> payload = ArgumentCaptor.forClass(Map.class);
+        verify(apiCallUtils).callApiWithRetry(eq(7L), eq(ProductPublishServiceImpl.PUBLISH_API), payload.capture(),
+                any(String.class), eq("1.0"), eq(null), eq(null));
+        Map<?, ?> address = (Map<?, ?>) payload.getValue().get("itemAddrDTO");
+        assertEquals("310115", address.get("divisionId"));
+        assertEquals("张江自提点", address.get("poiName"));
+        assertEquals("121.5,31.2", address.get("gps"));
+    }
+
+    @Test
+    void shouldRequireAcknowledgementBeforeAnyNetworkCall() {
+        ProductPublishReqDTO request = request();
+        request.setAcknowledged(false);
+
+        assertThrows(BusinessException.class, () -> service.publish(request));
+        verify(probeService, never()).check(any(), any());
+    }
+
+    @Test
+    void shouldTreatMissingXianyuCookieAsBusinessConflict() {
+        when(accountService.getCookieByAccountId(7L)).thenReturn(" ");
+
+        BusinessException exception = assertThrows(BusinessException.class,
+                () -> service.listLocations(7L, null, null));
+
+        assertEquals(409, exception.getCode());
+        assertTrue(exception.getMessage().contains("Cookie"));
+        verify(apiCallUtils, never()).callApiWithRetry(any(), any(), any(), any(), any(), any(), any());
+    }
+
+    private ProductPublishReqDTO request() {
+        ProductPublishReqDTO request = new ProductPublishReqDTO();
+        request.setAccountId(7L);
+        request.setRequestId(UUID.randomUUID().toString());
+        request.setTitle("全新蓝牙耳机");
+        request.setDescription("全新未拆封，配件齐全，支持包邮。");
+        request.setPrice(new BigDecimal("1.00"));
+        request.setQuantity(1);
+        request.setDeliveryMode("FREE");
+        request.setAcknowledged(true);
+        request.setConfirmation("确认发布");
+        ProductPublishReqDTO.Image image = new ProductPublishReqDTO.Image();
+        image.setUrl("https://img.alicdn.com/test.jpg");
+        image.setWidth(800);
+        image.setHeight(800);
+        request.setImages(List.of(image));
+        ProductPublishReqDTO.PropertySelection selection = new ProductPublishReqDTO.PropertySelection();
+        selection.setPropertyId("20000");
+        selection.setValueKey("1001");
+        request.setProperties(List.of(selection));
+        return request;
+    }
+
+    private PublishCapabilityCheckRespDTO generalSchema() {
+        PublishCapabilityCheckRespDTO schema = new PublishCapabilityCheckRespDTO();
+        schema.setCategoryApiReady(true);
+        schema.setLocationApiReady(true);
+        schema.setSupportLevel("GENERAL_FORM");
+        schema.setSupportLabel("可使用通用动态表单");
+        schema.setCategoryId("50012029");
+        schema.setCategoryName("耳机");
+        schema.setChannelCategoryId("1268");
+        schema.setTaobaoCategoryId("1512");
+        PublishCapabilityCheckRespDTO.Property property = new PublishCapabilityCheckRespDTO.Property();
+        property.setPropertyId("20000");
+        property.setPropertyName("品牌");
+        property.setRequired(true);
+        PublishCapabilityCheckRespDTO.Option option = new PublishCapabilityCheckRespDTO.Option();
+        option.setValueId("1001");
+        option.setValueName("其他品牌");
+        option.setChannelCategoryId("9001");
+        option.setTaobaoCategoryId("1512");
+        property.setOptions(List.of(option));
+        schema.setProperties(List.of(property));
+        return schema;
+    }
+
+    private PublishCapabilityCheckRespDTO assistServiceSchema() {
+        PublishCapabilityCheckRespDTO schema = generalSchema();
+        schema.setSupportLevel("SERVICE_FORM");
+        schema.setSupportLabel("拼单/助力服务表单");
+        schema.setCategoryName("拼单/助力");
+        schema.setProperties(List.of(
+                serviceProperty("delivery-period", "交付周期", "10m", "10分钟"),
+                serviceProperty("service-type", "服务类型", "assist", "助力"),
+                serviceProperty("pricing", "计价方式", "unit", "元/次")));
+        return schema;
+    }
+
+    private PublishCapabilityCheckRespDTO.Property serviceProperty(String id, String name, String valueId, String valueName) {
+        PublishCapabilityCheckRespDTO.Property property = new PublishCapabilityCheckRespDTO.Property();
+        property.setPropertyId(id);
+        property.setPropertyName(name);
+        property.setRequired(true);
+        PublishCapabilityCheckRespDTO.Option option = new PublishCapabilityCheckRespDTO.Option();
+        option.setValueId(valueId);
+        option.setValueName(valueName);
+        option.setChannelCategoryId(valueId);
+        option.setTaobaoCategoryId("50012029");
+        property.setOptions(List.of(option));
+        return property;
+    }
+
+    private ProductPublishReqDTO.PropertySelection selection(String propertyId, String valueKey) {
+        ProductPublishReqDTO.PropertySelection selection = new ProductPublishReqDTO.PropertySelection();
+        selection.setPropertyId(propertyId);
+        selection.setValueKey(valueKey);
+        return selection;
+    }
+
+    private ProductPublishReqDTO.SkuSpec sku(String name, String price, int quantity) {
+        ProductPublishReqDTO.SkuSpec spec = new ProductPublishReqDTO.SkuSpec();
+        spec.setName(name);
+        spec.setPrice(new BigDecimal(price));
+        spec.setQuantity(quantity);
+        return spec;
+    }
+}

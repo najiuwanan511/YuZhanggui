@@ -1,0 +1,93 @@
+package com.yuzhanggui.controller.dto;
+
+import lombok.Data;
+
+/**
+ * 自动发货记录DTO (简化版)
+ */
+@Data
+public class AutoDeliveryRecordDTO {
+    
+    /**
+     * 主键ID
+     */
+    private Long id;
+    
+    private Long xianyuAccountId;
+    
+    private String xyGoodsId;
+    
+    /**
+     * 商品标题
+     */
+    private String goodsTitle;
+    
+    /**
+     * 买家用户名称
+     */
+    private String buyerUserName;
+
+    private String buyerUserId;
+
+    private Boolean blacklisted;
+
+    private String blacklistReason;
+    
+    /**
+     * 发货消息内容
+     */
+    private String content;
+    
+    /**
+     * 发货是否成功: 1-成功, 0-失败
+     */
+    private Integer state;
+    
+    /**
+     * 确认发货状态: 0-未确认, 1-已确认
+     */
+    private Integer confirmState;
+    
+    /**
+     * 订单ID
+     */
+    private String orderId;
+
+    private String skuName;
+
+    private String orderCreateTime;
+
+    private String paySuccessTime;
+
+    private String consignTime;
+
+    private String totalPrice;
+
+    private Integer buyNum;
+
+    private String deliveryStatus;
+
+    private String deliveryChannel;
+
+    private String failReason;
+
+    private String lastErrorMessage;
+
+    private String tradeStatus;
+
+    private String tradeStatusText;
+
+    private Integer rateEnabled;
+
+    private Integer rateStatus;
+
+    private String rateError;
+
+    private Integer redFlowerEnabled;
+
+    private Integer redFlowerStatus;
+
+    private String redFlowerError;
+
+    private String createTime;
+}

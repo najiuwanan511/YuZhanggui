@@ -1,0 +1,135 @@
+name: Publish container image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to publish
+        required: true
+        default: v1.0.0
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: najiuwanan511/yuzhanggui
+
+jobs:
+  publish:
+    name: Build and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出发布版本
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+
+      - name: 校验发布版本与源码一致
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+        run: python3 deploy/validate-release-version.py "$RELEASE_TAG"
+
+      - name: 配置 Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: 登录 GitHub Container Registry
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: 解析镜像标签
+        id: image
+        shell: bash
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "revision=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: 构建并发布镜像
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          build-args: |
+            APP_GIT_SHA=${{ steps.image.outputs.revision }}
+          tags: |
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ steps.image.outputs.tag }}
+            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
+          labels: |
+            org.opencontainers.image.title=YuZhanggui
+            org.opencontainers.image.description=单商家私有化闲鱼虚拟商品经营助手
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.image.outputs.revision }}
+            org.opencontainers.image.version=${{ steps.image.outputs.tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+  release-artifacts:
+    name: Build release JAR
+    runs-on: ubuntu-latest
+    steps:
+      - name: 检出发布版本
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+
+      - name: 校验发布版本与源码一致
+        env:
+          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}
+        run: python3 deploy/validate-release-version.py "$RELEASE_TAG"
+
+      - name: 配置 Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: vue-code/package-lock.json
+
+      - name: 构建前端
+        working-directory: vue-code
+        run: |
+          npm ci
+          npm run type-check
+          npm run build
+
+      - name: 配置 Java 21
+        uses: actions/setup-java@c1e323688fd81a25caa38c78aa6df2d33d3e20d9 # v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+
+      - name: 构建并校验后端
+        shell: bash
+        run: |
+          chmod +x mvnw
+          ./mvnw clean package
+
+      - name: 校验部署配置迁移
+        run: |
+          python3 -m unittest discover -s deploy/tests -v
+          bash -n update.sh
+          bash -n deploy/self-update/yuzhanggui-update-agent.sh
+
+      - name: 生成正式版本附件
+        id: artifact
+        shell: bash
+        run: |
+          TAG="${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.event.release.tag_name }}"
+          VERSION="${TAG#v}"
+          JAR="yuzhanggui-${VERSION}.jar"
+          cp target/yuzhanggui.jar "$JAR"
+          sha256sum "$JAR" > SHA256SUMS.txt
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "jar=${JAR}" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 JAR 与校验文件
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ steps.artifact.outputs.tag }}" "${{ steps.artifact.outputs.jar }}" SHA256SUMS.txt --clobber

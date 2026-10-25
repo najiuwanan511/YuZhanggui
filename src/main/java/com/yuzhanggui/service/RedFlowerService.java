@@ -1,0 +1,221 @@
+package com.yuzhanggui.service;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.yuzhanggui.controller.dto.OrderAutomationRecordDTO;
+import com.yuzhanggui.entity.XianyuAccount;
+import com.yuzhanggui.entity.XianyuGoodsOrder;
+import com.yuzhanggui.mapper.OrderAutomationRecordMapper;
+import com.yuzhanggui.mapper.XianyuAccountMapper;
+import com.yuzhanggui.utils.XianyuApiCallUtils;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.stereotype.Service;
+
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+/**
+ * 调用闲鱼专用接口为符合条件的订单求小红花。
+ */
+@Slf4j
+@Service
+public class RedFlowerService {
+
+    private static final String RED_FLOWER_API = "mtop.taobao.idlemessage.red.flower";
+
+    private final XianyuAccountMapper accountMapper;
+    private final AccountService accountService;
+    private final OrderAutomationRecordMapper automationRecordMapper;
+    private final XianyuApiCallUtils xianyuApiCallUtils;
+
+    @Autowired(required = false)
+    private AutomationExceptionNotificationService automationExceptionNotificationService;
+
+    @Autowired(required = false)
+    private AutomationRiskGuardService automationRiskGuardService;
+
+    @Value("${app.red-flower.lookback-days:30}")
+    private int lookbackDays = 30;
+
+    @Value("${app.red-flower.batch-size:50}")
+    private int batchSize = 50;
+
+    public RedFlowerService(XianyuAccountMapper accountMapper,
+                            AccountService accountService,
+                            OrderAutomationRecordMapper automationRecordMapper,
+                            XianyuApiCallUtils xianyuApiCallUtils) {
+        this.accountMapper = accountMapper;
+        this.accountService = accountService;
+        this.automationRecordMapper = automationRecordMapper;
+        this.xianyuApiCallUtils = xianyuApiCallUtils;
+    }
+
+    /**
+     * 扫描已成功自动发货、尚未求小红花的近期订单。
+     */
+    public void processPendingRedFlowers() {
+        List<XianyuAccount> accounts = accountMapper.selectList(new LambdaQueryWrapper<XianyuAccount>()
+                .eq(XianyuAccount::getStatus, 1)
+                .eq(XianyuAccount::getAutoAskFlower, 1));
+        for (XianyuAccount account : accounts) {
+            processPendingRedFlowersForAccount(account.getId());
+        }
+    }
+
+    /**
+     * Runs the red-flower scan for one eligible account.  This is shared by
+     * the scheduled scan and the post-confirm-shipment hook.
+     */
+    public void processPendingRedFlowersForAccount(Long accountId) {
+        if (accountId == null) {
+            return;
+        }
+        XianyuAccount account = accountMapper.selectById(accountId);
+        if (account == null
+                || !Integer.valueOf(1).equals(account.getStatus())
+                || !Integer.valueOf(1).equals(account.getAutoAskFlower())) {
+            return;
+        }
+        if (automationRiskGuardService != null && automationRiskGuardService.isPaused(accountId)) {
+            return;
+        }
+        processAccount(accountId);
+    }
+
+    /**
+     * Requests a red flower immediately after a successful shipment
+     * confirmation.  It deliberately does not run at payment time.
+     */
+    public boolean requestAfterShipmentConfirmed(Long accountId, String orderId) {
+        if (accountId == null || orderId == null || orderId.isBlank()) {
+            return false;
+        }
+        XianyuAccount account = accountMapper.selectById(accountId);
+        if (account == null
+                || !Integer.valueOf(1).equals(account.getStatus())
+                || !Integer.valueOf(1).equals(account.getAutoAskFlower())
+                || (automationRiskGuardService != null && automationRiskGuardService.isPaused(accountId))) {
+            return false;
+        }
+        if (automationRecordMapper.countConfirmedShipmentOrder(accountId, orderId) <= 0) {
+            return false;
+        }
+        OrderAutomationRecordDTO timeline = automationRecordMapper.findTimelineState(accountId, orderId);
+        if (timeline != null && Integer.valueOf(1).equals(timeline.getRedFlowerStatus())) {
+            return true;
+        }
+        return retryRedFlower(accountId, orderId);
+    }
+
+    /** Attempts one red-flower request when an order becomes paid. */
+    public boolean requestAfterPayment(Long accountId, String orderId) {
+        if (accountId == null || orderId == null || orderId.isBlank()) return false;
+        XianyuAccount account = accountMapper.selectById(accountId);
+        if (account == null || !Integer.valueOf(1).equals(account.getStatus())
+                || !Integer.valueOf(1).equals(account.getAutoAskFlower())) return false;
+        return retryRedFlower(accountId, orderId);
+    }
+    void processAccount(Long accountId) {
+        if (accountId == null) {
+            return;
+        }
+
+        List<XianyuGoodsOrder> orders = automationRecordMapper.findRedFlowerCandidates(
+                accountId, lookbackDays, batchSize);
+        if (orders.isEmpty()) {
+            return;
+        }
+
+        String cookie = accountService.getCookieByAccountId(accountId);
+        if (cookie == null || cookie.isBlank()) {
+            String error = "Cookie 不可用，请重新登录该闲鱼账号后重试";
+            for (XianyuGoodsOrder order : orders) {
+                automationRecordMapper.markRedFlowerFailure(accountId, order.getOrderId(), error);
+            }
+            notifyFailure(accountId, error, orders.size());
+            log.warn("【账号{}】求小红花失败：Cookie 不可用", accountId);
+            return;
+        }
+
+        for (XianyuGoodsOrder order : orders) {
+            requestRedFlower(accountId, order.getOrderId(), cookie);
+            if (automationRiskGuardService != null && automationRiskGuardService.isPaused(accountId)) {
+                log.warn("【账号{}】小红花任务触发自动化保护，停止本轮剩余订单", accountId);
+                break;
+            }
+        }
+    }
+
+    /**
+     * 在执行中心中对单笔订单立即补发小红花请求。
+     */
+    public boolean retryRedFlower(Long accountId, String orderId) {
+        if (accountId == null || orderId == null || orderId.isBlank()) {
+            return false;
+        }
+        String cookie = accountService.getCookieByAccountId(accountId);
+        if (cookie == null || cookie.isBlank()) {
+            automationRecordMapper.markRedFlowerFailure(accountId, orderId,
+                    "Cookie 不可用，请重新登录该闲鱼账号后重试");
+            log.warn("【账号{}】手动重试小红花失败：Cookie 不可用，orderId={}", accountId, orderId);
+            return false;
+        }
+        return requestRedFlower(accountId, orderId, cookie);
+    }
+
+    private boolean requestRedFlower(Long accountId, String orderId, String cookie) {
+        if (orderId == null || orderId.isBlank()) {
+            return false;
+        }
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("orderId", orderId);
+        payload.put("channel", "list");
+
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Origin", "https://www.goofish.com");
+        headers.put("Referer", "https://www.goofish.com/");
+
+        Map<String, String> query = new HashMap<>();
+        query.put("v", "4.0");
+        query.put("type", "originaljson");
+
+        XianyuApiCallUtils.ApiCallResult result = xianyuApiCallUtils.callApiWithRetry(
+                accountId, RED_FLOWER_API, payload, cookie, "1.0", headers, query);
+        if (result.isSuccess()) {
+            automationRecordMapper.markRedFlowerSuccess(accountId, orderId);
+            if (automationRiskGuardService != null) {
+                automationRiskGuardService.recordSuccess(accountId, "小红花");
+            }
+            log.info("【账号{}】订单求小红花成功：orderId={}", accountId, orderId);
+            return true;
+        }
+
+        String error = truncate(result.getErrorMessage());
+        automationRecordMapper.markRedFlowerFailure(accountId, orderId, error);
+        notifyFailure(accountId, error, 1);
+        log.warn("【账号{}】订单求小红花失败：orderId={}, reason={}", accountId, orderId, error);
+        return false;
+    }
+
+    private String truncate(String message) {
+        if (message == null || message.isBlank()) {
+            return "接口调用失败，未返回错误信息";
+        }
+        return message.substring(0, Math.min(message.length(), 500));
+    }
+
+    private void notifyFailure(Long accountId, String reason, int affectedCount) {
+        String detail = affectedCount > 1
+                ? "本次有 " + affectedCount + " 笔订单未能请求小红花：" + reason
+                : reason;
+        if (automationExceptionNotificationService != null) {
+            automationExceptionNotificationService.notify(accountId, "小红花", detail, Map.of());
+        }
+        if (automationRiskGuardService != null) {
+            automationRiskGuardService.recordFailure(accountId, "小红花", detail);
+        }
+    }
+}

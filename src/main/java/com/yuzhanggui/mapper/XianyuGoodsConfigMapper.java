@@ -1,0 +1,85 @@
+package com.yuzhanggui.mapper;
+
+import com.yuzhanggui.entity.XianyuGoodsConfig;
+import org.apache.ibatis.annotations.*;
+
+/**
+ * 商品配置Mapper
+ */
+@Mapper
+public interface XianyuGoodsConfigMapper {
+    
+    /**
+     * 根据账号ID和商品ID查询配置
+     */
+    @Select("SELECT * FROM xianyu_goods_config WHERE xianyu_account_id = #{accountId} AND xy_goods_id = #{xyGoodsId}")
+    XianyuGoodsConfig selectByAccountAndGoodsId(@Param("accountId") Long accountId, @Param("xyGoodsId") String xyGoodsId);
+
+    @Select("SELECT * FROM xianyu_goods_config WHERE xianyu_account_id = #{accountId}")
+    java.util.List<XianyuGoodsConfig> selectByAccountId(@Param("accountId") Long accountId);
+    
+    /**
+     * 插入配置
+     */
+    @Insert("INSERT INTO xianyu_goods_config (xianyu_account_id, xianyu_goods_id, xy_goods_id, xianyu_auto_delivery_on, xianyu_auto_reply_on, xianyu_auto_reply_context_on, xianyu_keyword_reply_on, product_default_reply_on, product_default_reply_mode, product_default_reply_text, product_default_reply_image_url, human_intervention_on, human_intervention_minutes, fixed_material, ai_prompt, ai_bargain_on, ai_bargain_floor_price, ai_bargain_step_amount, ai_bargain_max_rounds, ai_bargain_style, ai_bargain_floor_reply, ai_bargain_instructions) " +
+            "VALUES (#{xianyuAccountId}, #{xianyuGoodsId}, #{xyGoodsId}, #{xianyuAutoDeliveryOn}, #{xianyuAutoReplyOn}, #{xianyuAutoReplyContextOn}, #{xianyuKeywordReplyOn}, #{productDefaultReplyOn}, #{productDefaultReplyMode}, #{productDefaultReplyText}, #{productDefaultReplyImageUrl}, #{humanInterventionOn}, #{humanInterventionMinutes}, #{fixedMaterial}, #{aiPrompt}, #{aiBargainOn}, #{aiBargainFloorPrice}, #{aiBargainStepAmount}, #{aiBargainMaxRounds}, #{aiBargainStyle}, #{aiBargainFloorReply}, #{aiBargainInstructions})")
+    @Options(useGeneratedKeys = true, keyProperty = "id")
+    int insert(XianyuGoodsConfig config);
+    
+    /**
+     * 更新配置
+     */
+    @Update("UPDATE xianyu_goods_config SET xianyu_auto_delivery_on = #{xianyuAutoDeliveryOn}, " +
+            "xianyu_auto_reply_on = #{xianyuAutoReplyOn}, " +
+            "xianyu_auto_reply_context_on = #{xianyuAutoReplyContextOn}, " +
+            "xianyu_keyword_reply_on = #{xianyuKeywordReplyOn}, " +
+            "product_default_reply_on = #{productDefaultReplyOn}, " +
+            "product_default_reply_mode = #{productDefaultReplyMode}, " +
+            "product_default_reply_text = #{productDefaultReplyText}, " +
+            "product_default_reply_image_url = #{productDefaultReplyImageUrl}, " +
+            "human_intervention_on = #{humanInterventionOn}, " +
+            "human_intervention_minutes = #{humanInterventionMinutes}, " +
+            "fixed_material = #{fixedMaterial}, " +
+            "ai_prompt = #{aiPrompt}, " +
+            "ai_bargain_on = #{aiBargainOn}, " +
+            "ai_bargain_floor_price = #{aiBargainFloorPrice}, " +
+            "ai_bargain_step_amount = #{aiBargainStepAmount}, " +
+            "ai_bargain_max_rounds = #{aiBargainMaxRounds}, " +
+            "ai_bargain_style = #{aiBargainStyle}, " +
+            "ai_bargain_floor_reply = #{aiBargainFloorReply}, " +
+            "ai_bargain_instructions = #{aiBargainInstructions} WHERE id = #{id}")
+    int update(XianyuGoodsConfig config);
+    
+    /**
+     * 更新固定资料
+     */
+    @Update("UPDATE xianyu_goods_config SET fixed_material = #{fixedMaterial} WHERE xianyu_account_id = #{accountId} AND xy_goods_id = #{xyGoodsId}")
+    int updateFixedMaterial(@Param("accountId") Long accountId, @Param("xyGoodsId") String xyGoodsId, @Param("fixedMaterial") String fixedMaterial);
+
+    /**
+     * 保存商品专属 AI 规则与固定资料。
+     */
+    @Update("UPDATE xianyu_goods_config SET fixed_material = #{fixedMaterial}, ai_prompt = #{aiPrompt}, " +
+            "ai_bargain_on = #{aiBargainOn}, ai_bargain_floor_price = #{aiBargainFloorPrice}, " +
+            "ai_bargain_step_amount = #{aiBargainStepAmount}, ai_bargain_max_rounds = #{aiBargainMaxRounds}, " +
+            "ai_bargain_style = #{aiBargainStyle}, ai_bargain_floor_reply = #{aiBargainFloorReply}, " +
+            "ai_bargain_instructions = #{aiBargainInstructions} " +
+            "WHERE xianyu_account_id = #{accountId} AND xy_goods_id = #{xyGoodsId}")
+    int updateProductAiConfig(@Param("accountId") Long accountId,
+                              @Param("xyGoodsId") String xyGoodsId,
+                              @Param("fixedMaterial") String fixedMaterial,
+                              @Param("aiPrompt") String aiPrompt,
+                              @Param("aiBargainOn") Integer aiBargainOn,
+                              @Param("aiBargainFloorPrice") java.math.BigDecimal aiBargainFloorPrice,
+                              @Param("aiBargainStepAmount") java.math.BigDecimal aiBargainStepAmount,
+                              @Param("aiBargainMaxRounds") Integer aiBargainMaxRounds,
+                              @Param("aiBargainStyle") String aiBargainStyle,
+                              @Param("aiBargainFloorReply") String aiBargainFloorReply,
+                              @Param("aiBargainInstructions") String aiBargainInstructions);
+    
+    /**
+     * 根据账号ID删除配置
+     */
+    @Delete("DELETE FROM xianyu_goods_config WHERE xianyu_account_id = #{accountId}")
+    int deleteByAccountId(@Param("accountId") Long accountId);
+}

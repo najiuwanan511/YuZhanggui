@@ -1,0 +1,65 @@
+package com.yuzhanggui.controller.dto;
+
+import lombok.Data;
+
+import java.math.BigDecimal;
+
+/**
+ * 首页统计信息响应DTO
+ */
+@Data
+public class DashboardStatsRespDTO {
+    
+    /**
+     * 账号总数
+     */
+    private Integer accountCount;
+    
+    /**
+     * 商品总数
+     */
+    private Integer itemCount;
+    
+    /**
+     * 在售商品数
+     */
+    private Integer sellingItemCount;
+    
+    /**
+     * 已下架商品数
+     */
+    private Integer offShelfItemCount;
+    
+    /**
+     * 已售出商品数
+     */
+    private Integer soldItemCount;
+
+    /** 今日下单数，按闲鱼订单的下单/付款时间统计。 */
+    private Integer todayOrderCount;
+
+    /** 当前已同步到本系统的订单总数。 */
+    private Integer totalOrderCount;
+
+    private BigDecimal todayRevenue;
+
+    private Integer todayDeliveryCount;
+
+    private Integer todayReplyCount;
+
+    /** 真正需要商家处理的订单总数，不包含买家待付款。 */
+    private Integer merchantActionOrderCount;
+
+    private Integer pendingTaskCount;
+
+    private Integer reviewRequiredCount;
+
+    private Integer failedTaskCount;
+
+    private Integer availableKamiCount;
+
+    private Integer lowStockConfigCount;
+
+    /** 当前在线客服中尚未处理的买家消息数。 */
+    private Integer unreadMessageCount;
+}

@@ -1,0 +1,467 @@
+package com.yuzhanggui.service;
+
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.yuzhanggui.mapper.OrderAutomationRecordMapper;
+import com.yuzhanggui.utils.XianyuApiCallUtils;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.TaskScheduler;
+import org.springframework.stereotype.Service;
+
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Locale;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+
+/**
+ * 自动评价服务。
+ */
+@Slf4j
+@Service
+public class RateService {
+
+    private static final String RATE_CREATE_API = "mtop.taobao.idle.rate.create";
+    private static final String RATE_LIST_API = "mtop.taobao.idle.merchant.rate.list";
+    private static final int PAGE_SIZE = 50;
+    private static final int MAX_PAGES_PER_RUN = 10;
+    private static final int MAX_TIMEOUT_RECHECKS = 2;
+    private static final Duration TIMEOUT_RECHECK_DELAY = Duration.ofMinutes(5);
+
+    private final AccountService accountService;
+    private final XianyuApiCallUtils xianyuApiCallUtils;
+    private final OrderAutomationRecordMapper automationRecordMapper;
+    private final TaskScheduler taskScheduler;
+    private final Set<String> scheduledTimeoutRechecks = ConcurrentHashMap.newKeySet();
+    private final Map<String, Integer> timeoutRecheckAttempts = new ConcurrentHashMap<>();
+    private final ObjectMapper objectMapper = new ObjectMapper();
+
+    @Autowired(required = false)
+    private AutomationExceptionNotificationService automationExceptionNotificationService;
+
+    @Autowired(required = false)
+    private AutomationRiskGuardService automationRiskGuardService;
+
+    public RateService(AccountService accountService,
+                       XianyuApiCallUtils xianyuApiCallUtils,
+                       OrderAutomationRecordMapper automationRecordMapper) {
+        this(accountService, xianyuApiCallUtils, automationRecordMapper, null);
+    }
+
+    @Autowired
+    public RateService(AccountService accountService,
+                       XianyuApiCallUtils xianyuApiCallUtils,
+                       OrderAutomationRecordMapper automationRecordMapper,
+                       @Qualifier("taskScheduler") TaskScheduler taskScheduler) {
+        this.accountService = accountService;
+        this.xianyuApiCallUtils = xianyuApiCallUtils;
+        this.automationRecordMapper = automationRecordMapper;
+        this.taskScheduler = taskScheduler;
+    }
+
+    /**
+     * 对指定订单提交好评，并记录最终处理结果。
+     */
+    public boolean rateBuyer(Long accountId, String tradeId, String feedback) {
+        if (accountId == null || tradeId == null || tradeId.isBlank() || feedback == null || feedback.isBlank()) {
+            return false;
+        }
+
+        String cookie = getCookie(accountId);
+        if (cookie == null) {
+            recordFailure(accountId, tradeId, "Cookie 不存在或为空");
+            return false;
+        }
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("tradeId", tradeId);
+        payload.put("rate", 1);
+        payload.put("feedback", feedback);
+        payload.put("createOrAppend", 0);
+
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Origin", "https://www.goofish.com");
+        headers.put("Referer", "https://www.goofish.com/");
+
+        Map<String, String> query = new HashMap<>();
+        query.put("v", "4.0");
+        query.put("type", "originaljson");
+
+        XianyuApiCallUtils.ApiCallResult result = xianyuApiCallUtils.callApiWithRetry(
+                accountId, RATE_CREATE_API, payload, cookie, "4.0", headers, query);
+        if (result.isSuccess() || isAlreadyRated(result)) {
+            clearTimeoutRechecks(accountId, tradeId);
+            automationRecordMapper.markRateSuccess(accountId, tradeId);
+            recordSuccess(accountId);
+            log.info("【自动评价】账号{}订单{}评价成功", accountId, tradeId);
+            return true;
+        }
+
+        if (isWaitingForCompletion(result)) {
+            String reason = "订单暂未完成，等待买家确认收货后再评价";
+            automationRecordMapper.markRateWaiting(accountId, tradeId, reason);
+            recordSuccess(accountId);
+            log.info("【自动评价】账号{}订单{}暂未完成，保留等待评价状态", accountId, tradeId);
+            return true;
+        }
+
+        if (isRateNotActionable(result)) {
+            String reason = normalizeError(result.getErrorMessage(), "当前订单无需评价");
+            automationRecordMapper.markRateSkipped(accountId, tradeId,
+                    reason.substring(0, Math.min(reason.length(), 500)));
+            recordSuccess(accountId);
+            log.info("【自动评价】账号{}订单{}无需评价：{}", accountId, tradeId, reason);
+            return true;
+        }
+
+        if (isSubmissionTimeout(result) && scheduleTimeoutRecheck(accountId, tradeId, feedback)) {
+            String reason = "评价请求超时，平台可能已受理；5 分钟后将只核验并重试这笔订单";
+            automationRecordMapper.markRateWaiting(accountId, tradeId, reason);
+            log.warn("【自动评价】账号{}订单{}评价请求超时，已安排单订单重试", accountId, tradeId);
+            return true;
+        }
+
+        clearTimeoutRechecks(accountId, tradeId);
+        recordFailure(accountId, tradeId, result.getErrorMessage());
+        log.warn("【自动评价】账号{}订单{}评价失败: {}", accountId, tradeId, result.getErrorMessage());
+        return false;
+    }
+
+    /**
+     * 获取全部待评价订单。单次最多处理 500 条，避免异常账号长时间占用调度线程。
+     */
+    public List<Map<String, Object>> getPendingRateList(Long accountId) {
+        return scanPendingRateList(accountId).items();
+    }
+
+    /** 获取待评价订单并保留接口失败状态，供人工批量操作使用。 */
+    public PendingRateListScan scanPendingRateList(Long accountId) {
+        if (accountId == null) {
+            return PendingRateListScan.failed("账号不能为空");
+        }
+
+        List<Map<String, Object>> orders = new ArrayList<>();
+        for (int pageNumber = 1; pageNumber <= MAX_PAGES_PER_RUN; pageNumber++) {
+            RatePage page = fetchPendingRatePage(accountId, pageNumber);
+            if (!page.success()) {
+                log.warn("【自动评价】账号{}获取待评价订单中止：{}", accountId, page.errorMessage());
+                return PendingRateListScan.failed(page.errorMessage());
+            }
+            orders.addAll(page.items());
+            if (page.items().size() < PAGE_SIZE || orders.size() >= page.totalCount()) {
+                break;
+            }
+        }
+        return PendingRateListScan.success(orders);
+    }
+
+    /**
+     * 手动检查一笔订单是否已经被闲鱼放入“待评价”列表。
+     * 只在平台确认可评价后才提交评价，避免提前调用评价接口。
+     */
+    public PendingRateOrderCheck checkOrderReadyForRate(Long accountId, String orderId) {
+        if (accountId == null || orderId == null || orderId.isBlank()) {
+            return new PendingRateOrderCheck(false, "账号或订单号不能为空");
+        }
+
+        int scanned = 0;
+        for (int pageNumber = 1; pageNumber <= MAX_PAGES_PER_RUN; pageNumber++) {
+            RatePage page = fetchPendingRatePage(accountId, pageNumber);
+            if (!page.success()) {
+                return new PendingRateOrderCheck(false, "查询闲鱼待评价列表失败：" + page.errorMessage());
+            }
+            for (Map<String, Object> item : page.items()) {
+                if (orderId.equals(extractTradeId(item))) {
+                    return new PendingRateOrderCheck(true, "订单已进入闲鱼待评价列表");
+                }
+            }
+            scanned += page.items().size();
+            if (page.items().size() < PAGE_SIZE || scanned >= page.totalCount()) {
+                break;
+            }
+        }
+        return new PendingRateOrderCheck(false, "订单暂未进入闲鱼待评价列表，请稍后再试");
+    }
+
+    private RatePage fetchPendingRatePage(Long accountId, int pageNumber) {
+        String cookie = getCookie(accountId);
+        if (cookie == null) {
+            return RatePage.failed("未找到当前有效 Cookie");
+        }
+
+        Map<String, Object> payload = new HashMap<>();
+        payload.put("pageNumber", pageNumber);
+        payload.put("rowsPerPage", PAGE_SIZE);
+        payload.put("queryType", "ORDER");
+        payload.put("rateSearchParam", Map.of("sellerRateStatus", "5"));
+
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Origin", "https://seller.goofish.com");
+        headers.put("Referer", "https://seller.goofish.com/?site=COMMONPRO");
+
+        Map<String, String> query = new HashMap<>();
+        query.put("v", "1.0");
+        query.put("type", "json");
+        query.put("valueType", "string");
+
+        XianyuApiCallUtils.ApiCallResult result = xianyuApiCallUtils.callApiWithRetry(
+                accountId, RATE_LIST_API, payload, cookie, "1.0", headers, query);
+        if (!result.isSuccess()) {
+            log.warn("【自动评价】账号{}获取待评价订单失败: {}", accountId, result.getErrorMessage());
+            return RatePage.failed(normalizeError(result.getErrorMessage(), "待评价列表接口调用失败"));
+        }
+
+        Map<String, Object> data = result.extractData();
+        if (data == null) {
+            log.warn("【自动评价】账号{}待评价列表返回成功但没有 data 字段", accountId);
+            return new RatePage(List.of(), 0, null);
+        }
+
+        Map<String, Object> module = findPageContainer(data);
+        List<Map<String, Object>> items = extractItems(findFirst(module,
+                "items", "itemList", "orderList", "records", "list"));
+        if (items.isEmpty() && module != data) {
+            items = extractItems(findFirst(data, "items", "itemList", "orderList", "records", "list"));
+        }
+        int totalCount = asInt(findFirst(module, "totalCount", "total", "count"), items.size());
+        if (totalCount == items.size() && module != data) {
+            totalCount = asInt(findFirst(data, "totalCount", "total", "count"), items.size());
+        }
+        return new RatePage(items, totalCount, null);
+    }
+
+    private String getCookie(Long accountId) {
+        String cookie = accountService.getCookieByAccountId(accountId);
+        if (cookie == null || cookie.isBlank()) {
+            log.warn("【自动评价】账号{}没有当前有效 Cookie", accountId);
+            return null;
+        }
+        return cookie;
+    }
+
+    /** 支持待评价列表在不同页面版本中的字段结构。 */
+    public String extractTradeId(Map<String, Object> item) {
+        return extractTradeId(item, 0);
+    }
+
+    private String extractTradeId(Map<String, Object> item, int depth) {
+        if (item == null || depth > 3) {
+            return null;
+        }
+        for (String key : List.of("bizOrderId", "tradeId", "orderId", "id")) {
+            Object value = item.get(key);
+            if (value == null) {
+                continue;
+            }
+            String tradeId = String.valueOf(value).trim();
+            if (!tradeId.isEmpty() && !"null".equalsIgnoreCase(tradeId)) {
+                return tradeId;
+            }
+        }
+        for (String key : List.of("order", "orderInfo", "tradeInfo", "bizOrder", "data", "item")) {
+            String tradeId = extractTradeId(asMap(item.get(key)), depth + 1);
+            if (tradeId != null) {
+                return tradeId;
+            }
+        }
+        return null;
+    }
+
+    private Map<String, Object> findPageContainer(Map<String, Object> data) {
+        return findPageContainer(data, 0);
+    }
+
+    private Map<String, Object> findPageContainer(Map<String, Object> data, int depth) {
+        if (data == null || depth >= 3 || findFirst(data,
+                "items", "itemList", "orderList", "records", "list") != null) {
+            return data;
+        }
+        for (String key : List.of("module", "result", "model", "content", "data")) {
+            Map<String, Object> nested = asMap(data.get(key));
+            if (nested != null) {
+                Map<String, Object> container = findPageContainer(nested, depth + 1);
+                if (container != null && findFirst(container,
+                        "items", "itemList", "orderList", "records", "list") != null) {
+                    return container;
+                }
+            }
+        }
+        return data;
+    }
+
+    private Object findFirst(Map<String, Object> source, String... keys) {
+        if (source == null) {
+            return null;
+        }
+        for (String key : keys) {
+            if (source.containsKey(key)) {
+                return source.get(key);
+            }
+        }
+        return null;
+    }
+
+    private Map<String, Object> asMap(Object value) {
+        if (value instanceof Map<?, ?> rawMap) {
+            Map<String, Object> result = new HashMap<>();
+            for (Map.Entry<?, ?> entry : rawMap.entrySet()) {
+                if (entry.getKey() != null) {
+                    result.put(String.valueOf(entry.getKey()), entry.getValue());
+                }
+            }
+            return result;
+        }
+        if (value instanceof String text && text.trim().startsWith("{")) {
+            try {
+                return objectMapper.readValue(text, new TypeReference<Map<String, Object>>() { });
+            } catch (Exception ignored) {
+                return null;
+            }
+        }
+        return null;
+    }
+
+    private List<Map<String, Object>> extractItems(Object rawItems) {
+        if (!(rawItems instanceof List<?> rawList)) {
+            return List.of();
+        }
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (Object rawItem : rawList) {
+            if (rawItem instanceof Map<?, ?> rawMap) {
+                Map<String, Object> item = new HashMap<>();
+                for (Map.Entry<?, ?> entry : rawMap.entrySet()) {
+                    if (entry.getKey() != null) {
+                        item.put(String.valueOf(entry.getKey()), entry.getValue());
+                    }
+                }
+                items.add(item);
+            }
+        }
+        return items;
+    }
+
+    private int asInt(Object value, int defaultValue) {
+        if (value instanceof Number number) {
+            return number.intValue();
+        }
+        try {
+            return value == null ? defaultValue : Integer.parseInt(String.valueOf(value));
+        } catch (NumberFormatException ignored) {
+            return defaultValue;
+        }
+    }
+
+    private String normalizeError(String value, String fallback) {
+        return value == null || value.isBlank() ? fallback : value;
+    }
+
+    private boolean isAlreadyRated(XianyuApiCallUtils.ApiCallResult result) {
+        String detail = (String.valueOf(result.getErrorMessage()) + " " + String.valueOf(result.getResponse()))
+                .toLowerCase(Locale.ROOT);
+        return detail.contains("已评价") || detail.contains("已经评价") || detail.contains("评价过了")
+                || detail.contains("重复评价")
+                || detail.contains("already_rate") || detail.contains("already rate");
+    }
+
+    private boolean isRateNotActionable(XianyuApiCallUtils.ApiCallResult result) {
+        String detail = (String.valueOf(result.getErrorMessage()) + " " + String.valueOf(result.getResponse()))
+                .toLowerCase(Locale.ROOT);
+        return isRateBeyondThirtyDays(detail)
+                || detail.contains("不支持评价") || detail.contains("无评价资格");
+    }
+
+    private boolean isWaitingForCompletion(XianyuApiCallUtils.ApiCallResult result) {
+        String detail = (String.valueOf(result.getErrorMessage()) + " " + String.valueOf(result.getResponse()))
+                .toLowerCase(Locale.ROOT);
+        return detail.contains("未完成的交易不允许评价") || detail.contains("未完成交易")
+                || isWaitingForCompletionReview(detail)
+                || detail.contains("交易未完成");
+    }
+
+    private boolean isRateBeyondThirtyDays(String detail) {
+        return detail.contains("超过30天的订单不允许评价")
+                || detail.contains("超出30天的订单不允许评价");
+    }
+
+    private boolean isWaitingForCompletionReview(String detail) {
+        return detail.contains("未完成的交易不允许追评")
+                || detail.contains("未完成交易不允许追评");
+    }
+
+    private boolean isSubmissionTimeout(XianyuApiCallUtils.ApiCallResult result) {
+        String detail = (String.valueOf(result.getErrorMessage()) + " " + String.valueOf(result.getResponse()))
+                .toLowerCase(Locale.ROOT);
+        return detail.contains("timeout") || detail.contains("timed out") || detail.contains("超时");
+    }
+
+    private boolean scheduleTimeoutRecheck(Long accountId, String tradeId, String feedback) {
+        if (taskScheduler == null) return false;
+        String key = accountId + ":" + tradeId;
+        if (!scheduledTimeoutRechecks.add(key)) return true;
+        int attempt = timeoutRecheckAttempts.merge(key, 1, Integer::sum);
+        if (attempt > MAX_TIMEOUT_RECHECKS) {
+            scheduledTimeoutRechecks.remove(key);
+            timeoutRecheckAttempts.remove(key);
+            return false;
+        }
+        taskScheduler.schedule(() -> {
+            scheduledTimeoutRechecks.remove(key);
+            rateBuyer(accountId, tradeId, feedback);
+        }, Instant.now().plus(TIMEOUT_RECHECK_DELAY));
+        return true;
+    }
+
+    private void clearTimeoutRechecks(Long accountId, String tradeId) {
+        String key = accountId + ":" + tradeId;
+        scheduledTimeoutRechecks.remove(key);
+        timeoutRecheckAttempts.remove(key);
+    }
+
+    private void recordFailure(Long accountId, String tradeId, String error) {
+        String safeError = error == null || error.isBlank() ? "评价接口调用失败" : error;
+        String reason = safeError.substring(0, Math.min(safeError.length(), 500));
+        automationRecordMapper.markRateFailure(accountId, tradeId, reason);
+        if (automationExceptionNotificationService != null) {
+            automationExceptionNotificationService.notify(accountId, "自动评价", reason,
+                    Map.of("orderId", tradeId));
+        }
+        if (automationRiskGuardService != null) {
+            automationRiskGuardService.recordFailure(accountId, "自动评价", reason);
+        }
+    }
+
+    private void recordSuccess(Long accountId) {
+        if (automationRiskGuardService != null) {
+            automationRiskGuardService.recordSuccess(accountId, "自动评价");
+        }
+    }
+
+    public record PendingRateOrderCheck(boolean ready, String message) {
+    }
+
+    public record PendingRateListScan(boolean success, List<Map<String, Object>> items, String message) {
+        private static PendingRateListScan success(List<Map<String, Object>> items) {
+            return new PendingRateListScan(true, items, "查询成功");
+        }
+
+        private static PendingRateListScan failed(String message) {
+            return new PendingRateListScan(false, List.of(), message);
+        }
+    }
+
+    private record RatePage(List<Map<String, Object>> items, int totalCount, String errorMessage) {
+        private static RatePage failed(String errorMessage) {
+            return new RatePage(List.of(), 0, errorMessage);
+        }
+
+        private boolean success() {
+            return errorMessage == null;
+        }
+    }
+}

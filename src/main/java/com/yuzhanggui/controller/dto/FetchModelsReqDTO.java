@@ -1,0 +1,9 @@
+package com.yuzhanggui.controller.dto;
+
+import lombok.Data;
+
+@Data
+public class FetchModelsReqDTO {
+    private String apiKey;
+    private String baseUrl;
+}

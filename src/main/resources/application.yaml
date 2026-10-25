@@ -1,0 +1,138 @@
+server:
+  port: 12400
+
+app:
+  executor:
+    core-size: ${EXECUTOR_CORE_SIZE:4}
+    max-size: ${EXECUTOR_MAX_SIZE:8}
+    queue-capacity: ${EXECUTOR_QUEUE_CAPACITY:500}
+  delivery:
+    claim-batch-size: ${DELIVERY_CLAIM_BATCH_SIZE:20}
+    dispatch-delay-ms: ${DELIVERY_DISPATCH_DELAY_MS:1000}
+    lease-seconds: ${DELIVERY_LEASE_SECONDS:120}
+    max-attempts: ${DELIVERY_MAX_ATTEMPTS:3}
+  red-flower:
+    interval-ms: ${RED_FLOWER_INTERVAL_MS:300000}
+    initial-delay-ms: ${RED_FLOWER_INITIAL_DELAY_MS:90000}
+    lookback-days: ${RED_FLOWER_LOOKBACK_DAYS:30}
+    batch-size: ${RED_FLOWER_BATCH_SIZE:50}
+  websocket:
+    scheduler-pool-size: ${WEBSOCKET_SCHEDULER_POOL_SIZE:16}
+    auto-reconnect-on-startup: ${WEBSOCKET_AUTO_RECONNECT_ON_STARTUP:true}
+    startup-reconnect-delay-ms: ${WEBSOCKET_STARTUP_RECONNECT_DELAY_MS:10000}
+    startup-reconnect-attempts: ${WEBSOCKET_STARTUP_RECONNECT_ATTEMPTS:8}
+    startup-reconnect-interval-ms: ${WEBSOCKET_STARTUP_RECONNECT_INTERVAL_MS:30000}
+    automatic-repair:
+      # 只巡检离线账号，复用现有凭证；在线、待验证及续期中的账号不做修复。
+      enabled: ${WEBSOCKET_AUTOMATIC_REPAIR_ENABLED:true}
+      min-hours: ${WEBSOCKET_AUTOMATIC_REPAIR_MIN_HOURS:2}
+      max-hours: ${WEBSOCKET_AUTOMATIC_REPAIR_MAX_HOURS:4}
+      account-spacing-minutes: ${WEBSOCKET_AUTOMATIC_REPAIR_ACCOUNT_SPACING_MINUTES:15}
+  item-polish:
+    scan-delay-ms: ${ITEM_POLISH_SCAN_DELAY_MS:30000}
+    initial-delay-ms: ${ITEM_POLISH_INITIAL_DELAY_MS:90000}
+  automation:
+    risk:
+      # 连续失败达到阈值后暂停该账号的外发自动化；可用环境变量按部署需要调整。
+      failure-threshold: ${AUTOMATION_RISK_FAILURE_THRESHOLD:3}
+      failure-window-minutes: ${AUTOMATION_RISK_FAILURE_WINDOW_MINUTES:30}
+  security:
+    allowed-origins: ${ALLOWED_ORIGINS:http://localhost:5173,http://localhost:12400}
+    trust-proxy: ${TRUST_PROXY:false}
+  captcha:
+    # 验证浏览器按账号创建独立 Context；桌面部署可设为 false 进行人工滑块验证。
+    browser-headless: ${CAPTCHA_BROWSER_HEADLESS:false}
+    enabled: ${CAPTCHA_BROWSER_ENABLED:true}
+    timeout-seconds: ${CAPTCHA_BROWSER_TIMEOUT_SECONDS:120}
+    max-concurrent: ${CAPTCHA_BROWSER_MAX_CONCURRENT:1}
+    remote-enabled: ${CAPTCHA_BROWSER_REMOTE_ENABLED:false}
+    remote-port: ${CAPTCHA_BROWSER_REMOTE_PORT:7900}
+    remote-url: ${CAPTCHA_BROWSER_REMOTE_URL:}
+    # 每个账号复用独立的浏览器存储状态和固定指纹；Docker中位于持久化/app/data卷。
+    profile-dir: ${CAPTCHA_BROWSER_PROFILE_DIR:./data/browser-profiles}
+
+# AI功能开关（默认开启，API Key从数据库xianyu_sys_setting表读取，未配置时AI功能自动降级）
+ai:
+  enabled: ${AI_ENABLED:true}
+
+# JWT配置
+jwt:
+  secret: ${JWT_SECRET}
+  expiration: ${JWT_EXPIRATION_MS:28800000}  # 默认8小时
+
+
+spring:
+  jackson:
+    date-format: yyyy-MM-dd HH:mm:ss
+    time-zone: GMT+8
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/yuzhanggui?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&rewriteBatchedStatements=true}
+    username: ${DB_USERNAME:yuzhanggui}
+    password: ${DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${DB_POOL_MAX_SIZE:10}
+      minimum-idle: ${DB_POOL_MIN_IDLE:2}
+      connection-timeout: ${DB_CONNECTION_TIMEOUT_MS:10000}
+      validation-timeout: 3000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    validate-on-migrate: true
+  # AI配置说明：
+  # - ai_api_key、ai_base_url、ai_model 配置在数据库 xianyu_sys_setting 表中
+  # - 通过 DynamicAIChatClientManager 动态读取，支持热更新无需重启
+  # - 默认值：base_url=https://dashscope.aliyuncs.com/compatible-mode, model=deepseek-v3
+
+# MyBatis配置
+mybatis-plus:
+  type-handlers-package: com.yuzhanggui.config
+  configuration:
+    default-enum-type-handler: org.apache.ibatis.type.EnumOrdinalTypeHandler
+
+# WebSocket配置（参考Python代码）
+websocket:
+  # 心跳间隔（秒）
+  heartbeat-interval: 15
+  # 心跳超时（秒）
+  heartbeat-timeout: 10
+  # Token重试间隔（秒，默认5分钟）
+  token-retry-interval: 300
+  # 默认只在接口真实失败时刷新 Cookie；如需主动健康检查可显式开启，间隔限制为2～4小时。
+  credential-keep-alive-enabled: ${WEBSOCKET_CREDENTIAL_KEEP_ALIVE_ENABLED:false}
+  credential-refresh-min-minutes: ${WEBSOCKET_CREDENTIAL_REFRESH_MIN_MINUTES:120}
+  credential-refresh-max-minutes: ${WEBSOCKET_CREDENTIAL_REFRESH_MAX_MINUTES:240}
+  # 关闭旧的每分钟 Token 扫描，连接自身会按数据库真实过期时间提前刷新。
+  token-refresh-scan-enabled: ${WEBSOCKET_TOKEN_REFRESH_SCAN_ENABLED:false}
+  # 消息过期时间（毫秒，默认5分钟）
+  message-expire-time: 300000
+  # 人工接管超时（秒，默认1小时）
+  manual-mode-timeout: 3600
+  # 人工接管切换关键词
+  toggle-keywords: 。
+  # 模拟人工输入延迟
+  simulate-human-typing: false
+  # 连接重连延迟（秒）
+  reconnect-delay: ${WEBSOCKET_RECONNECT_DELAY_SECONDS:15}
+  # 前5次指数退避，随后持续按最大间隔重试；等待安全验证时暂停。
+  max-reconnect-delay: ${WEBSOCKET_MAX_RECONNECT_DELAY_SECONDS:300}
+  # 最大重连次数
+  max-reconnect-attempts: ${WEBSOCKET_MAX_RECONNECT_ATTEMPTS:5}
+  # 消息发送重试次数
+  message-retry-attempts: 3
+  # 消息发送重试延迟（毫秒）
+  message-retry-delay: 1000
+  # 打印原始消息开关（解密后的消息）
+  print-raw-message: ${PRINT_RAW_MESSAGE:false}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: never

@@ -1,0 +1,40 @@
+package com.yuzhanggui.controller.dto;
+
+import lombok.Data;
+
+import java.time.LocalDateTime;
+
+/**
+ * 自动评价与小红花在单笔订单上的执行状态。
+ */
+@Data
+public class OrderAutomationRecordDTO {
+
+    private Long accountId;
+    private String accountName;
+    private String orderId;
+    private String buyerUserName;
+    private String goodsTitle;
+    private LocalDateTime orderCreateTime;
+    private String tradeStatus;
+    private String tradeStatusText;
+    /**
+     * 卖家确认发货状态：1-已确认，0-未确认。
+     */
+    private Integer confirmState;
+
+    private Integer rateEnabled;
+    private Integer rateStatus;
+    private LocalDateTime rateTime;
+    private String rateError;
+
+    private Integer redFlowerEnabled;
+    private Integer redFlowerStatus;
+    private LocalDateTime redFlowerTime;
+    private String redFlowerError;
+    private Integer redFlowerAttemptCount;
+    private LocalDateTime redFlowerNextRetryTime;
+
+    /** 最近一次自动化状态写入时间，供订单详情中的失败事件展示。 */
+    private LocalDateTime updatedTime;
+}
