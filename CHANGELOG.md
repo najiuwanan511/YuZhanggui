@@ -13,7 +13,7 @@
 - Maven 坐标、产物名、Docker 镜像、容器/数据卷/网络名统一改为 `yuzhanggui`，环境变量前缀由 `XIANYU_PLUS_*` 改为 `YUZHANGGUI_*`。
 - 默认数据库名改为 `yuzhanggui`；自动更新地址指向 `najiuwanan511/YuZhanggui`。
 - 前端静态资源重新构建，界面与邮件通知的品牌文案统一为「鱼掌柜」。
-- 上游 [Evvvvvvvan/XianYuSmart](https://github.com/Evvvvvvvan/XianYuSmart) 的署名与 PolyForm Noncommercial License 1.0.0 授权继续保留。
+- 授权继续采用 PolyForm Noncommercial License 1.0.0，原有条款与限制不变。
 - **旧版本用户请勿原地覆盖更新**：容器名、数据卷名与默认库名均已变化，请先备份，再用 `migrate-from-legacy.sh` 迁移。
 
 对比上一版本，功能逻辑未做改动，本次变更仅涉及项目标识、命名与部署命名空间。

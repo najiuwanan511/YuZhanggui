@@ -262,11 +262,7 @@ docker compose down
 
 ## 致谢与来源说明
 
-鱼掌柜（YuZhanggui）在 [Evvvvvvvan/XianYuSmart](https://github.com/Evvvvvvvan/XianYuSmart) 的基础上持续迭代，并参考了社区项目在订单同步、自动评价、小红花和商品管理方面的实现思路。
-
-本项目延续上游的 PolyForm Noncommercial License 1.0.0 授权，仅在非商业场景下使用、修改与分发；原项目及其作者的权利与署名一并保留。
-
-感谢原作者，以及所有提供反馈、测试结果与改进建议的用户。
+感谢所有提供反馈、测试结果与改进建议的用户。
 
 ## 使用与许可
 
