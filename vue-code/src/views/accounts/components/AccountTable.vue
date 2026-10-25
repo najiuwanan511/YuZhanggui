@@ -259,14 +259,17 @@ const refreshAvatar = (account: Account) => {
       <div class="account-card__automation">
         <span class="account-card__automation-label">自动化</span>
         <div class="account-card__automation-list">
-          <button type="button" class="automation-chip automation-chip--toggle" :class="{ 'automation-chip--on': isEnabled(account.autoRateEnabled) }" :title="isEnabled(account.autoRateEnabled) ? '点击关闭自动评价' : '点击开启自动评价'" @click="emit('toggleAutomation', account, 'rate')">
-            自动评价 {{ isEnabled(account.autoRateEnabled) ? '已开启' : '已关闭' }}
+          <button type="button" class="automation-switch" :title="`自动评价当前${isEnabled(account.autoRateEnabled) ? '已开启' : '已关闭'}，点击打开设置`" @click="emit('automationSettings', account, 'rate')">
+            <span class="automation-switch__label">自动评价</span>
+            <span class="automation-switch__track" :class="{ 'automation-switch__track--on': isEnabled(account.autoRateEnabled) }" aria-hidden="true"><span class="automation-switch__knob"></span></span>
           </button>
-          <button type="button" class="automation-chip automation-chip--toggle" :class="{ 'automation-chip--on': isEnabled(account.autoAskFlower) }" :title="isEnabled(account.autoAskFlower) ? '点击关闭自动求花' : '点击开启自动求花'" @click="emit('toggleAutomation', account, 'flower')">
-            自动求花 {{ isEnabled(account.autoAskFlower) ? '已开启' : '已关闭' }}
+          <button type="button" class="automation-switch" :title="`自动求花当前${isEnabled(account.autoAskFlower) ? '已开启' : '已关闭'}，点击打开设置`" @click="emit('automationSettings', account, 'flower')">
+            <span class="automation-switch__label">自动求花</span>
+            <span class="automation-switch__track" :class="{ 'automation-switch__track--on': isEnabled(account.autoAskFlower) }" aria-hidden="true"><span class="automation-switch__knob"></span></span>
           </button>
-          <button type="button" class="automation-chip automation-chip--toggle" :class="{ 'automation-chip--on': isEnabled(account.itemPolishEnabled) }" title="擦亮需配置擦亮时间，点击前往设置" @click="emit('polishShortcut', account)">
-            每日擦亮 {{ getItemPolishStatus(account) }}
+          <button type="button" class="automation-switch" :title="`每日擦亮${getItemPolishStatus(account)}，点击打开设置`" @click="emit('automationSettings', account, 'polish')">
+            <span class="automation-switch__label">每日擦亮</span>
+            <span class="automation-switch__track" :class="{ 'automation-switch__track--on': isEnabled(account.itemPolishEnabled) }" aria-hidden="true"><span class="automation-switch__knob"></span></span>
           </button>
           <span v-if="isRiskPaused(account)" class="automation-chip automation-chip--risk" :title="account.automationRiskPauseReason">
             自动化已保护暂停
@@ -291,16 +294,12 @@ const refreshAvatar = (account: Account) => {
         </button>
         <div class="account-card__more-wrap" @click.stop>
           <button class="account-card__btn account-card__btn--more" type="button" @click="toggleActionMenu($event, account.id)">
-            <span>自动化设置</span>
+            <span>更多</span>
             <span class="account-card__more-caret">⌄</span>
           </button>
           <Transition name="action-menu">
             <div v-if="openedActionMenuId === account.id" class="account-action-menu account-action-menu--mobile" role="menu">
-              <div class="account-action-menu__title">自动化配置</div>
-              <button type="button" role="menuitem" @click="runAction($event, () => emit('automationSettings', account, 'rate'))">自动评价</button>
-              <button type="button" role="menuitem" @click="runAction($event, () => emit('automationSettings', account, 'flower'))">自动小红花</button>
-              <button type="button" role="menuitem" @click="runAction($event, () => emit('automationSettings', account, 'polish'))">每日自动擦亮</button>
-              <button type="button" role="menuitem" @click="runAction($event, () => emit('polishShortcut', account))">一键擦亮设置 / 查看记录</button>
+              <button type="button" role="menuitem" @click="runAction($event, () => emit('polishShortcut', account))">一键擦亮记录</button>
               <div class="account-action-menu__divider"></div>
               <button type="button" role="menuitem" @click="runAction($event, () => emit('edit', account))"><IconEdit /> 编辑账号资料</button>
               <button type="button" role="menuitem" :disabled="!isRiskPaused(account)" @click="runAction($event, () => emit('resumeAutomation', account))">恢复自动化</button>
@@ -372,9 +371,18 @@ const refreshAvatar = (account: Account) => {
           <section class="account-overview-card__section account-overview-card__section--automation">
             <span class="account-overview-card__label">自动化</span>
             <div class="account-overview-card__automation-items">
-              <button type="button" class="account-overview-card__automation-item" :class="{ 'account-overview-card__automation-item--on': isEnabled(account.autoRateEnabled) }" :title="isEnabled(account.autoRateEnabled) ? '点击关闭自动评价' : '点击开启自动评价'" @click="emit('toggleAutomation', account, 'rate')">评价 <b>{{ isEnabled(account.autoRateEnabled) ? '开启' : '关闭' }}</b></button>
-              <button type="button" class="account-overview-card__automation-item" :class="{ 'account-overview-card__automation-item--on': isEnabled(account.autoAskFlower) }" :title="isEnabled(account.autoAskFlower) ? '点击关闭自动求花' : '点击开启自动求花'" @click="emit('toggleAutomation', account, 'flower')">小红花 <b>{{ isEnabled(account.autoAskFlower) ? '开启' : '关闭' }}</b></button>
-              <button type="button" class="account-overview-card__automation-item" :class="{ 'account-overview-card__automation-item--on': isEnabled(account.itemPolishEnabled) }" title="擦亮需配置擦亮时间，点击前往设置" @click="emit('polishShortcut', account)">擦亮 <b>{{ getItemPolishStatus(account) }}</b></button>
+              <button type="button" class="automation-switch" :title="`自动评价当前${isEnabled(account.autoRateEnabled) ? '已开启' : '已关闭'}，点击打开设置`" @click="emit('automationSettings', account, 'rate')">
+                <span class="automation-switch__label">自动评价</span>
+                <span class="automation-switch__track" :class="{ 'automation-switch__track--on': isEnabled(account.autoRateEnabled) }" aria-hidden="true"><span class="automation-switch__knob"></span></span>
+              </button>
+              <button type="button" class="automation-switch" :title="`自动求花当前${isEnabled(account.autoAskFlower) ? '已开启' : '已关闭'}，点击打开设置`" @click="emit('automationSettings', account, 'flower')">
+                <span class="automation-switch__label">自动求花</span>
+                <span class="automation-switch__track" :class="{ 'automation-switch__track--on': isEnabled(account.autoAskFlower) }" aria-hidden="true"><span class="automation-switch__knob"></span></span>
+              </button>
+              <button type="button" class="automation-switch" :title="`每日擦亮${getItemPolishStatus(account)}，点击打开设置`" @click="emit('automationSettings', account, 'polish')">
+                <span class="automation-switch__label">每日擦亮</span>
+                <span class="automation-switch__track" :class="{ 'automation-switch__track--on': isEnabled(account.itemPolishEnabled) }" aria-hidden="true"><span class="automation-switch__knob"></span></span>
+              </button>
             </div>
             <small v-if="isRiskPaused(account)" class="account-overview-card__risk" :title="account.automationRiskPauseReason">
               <span>自动化已保护暂停</span>
@@ -403,16 +411,12 @@ const refreshAvatar = (account: Account) => {
               </button>
               <div class="table__action-menu-wrap" @click.stop>
                 <button class="table__action table__action--more" type="button" @click="toggleActionMenu($event, account.id)">
-                  <span>自动化设置</span>
+                  <span>更多</span>
                   <span class="table__action-caret">⌄</span>
                 </button>
                 <Transition name="action-menu">
                   <div v-if="openedActionMenuId === account.id" class="account-action-menu" role="menu">
-                    <div class="account-action-menu__title">自动化配置</div>
-                    <button type="button" role="menuitem" @click="runAction($event, () => emit('automationSettings', account, 'rate'))">自动评价</button>
-                    <button type="button" role="menuitem" @click="runAction($event, () => emit('automationSettings', account, 'flower'))">自动小红花</button>
-                    <button type="button" role="menuitem" @click="runAction($event, () => emit('automationSettings', account, 'polish'))">每日自动擦亮</button>
-              <button type="button" role="menuitem" @click="runAction($event, () => emit('polishShortcut', account))">一键擦亮设置 / 查看记录</button>
+                    <button type="button" role="menuitem" @click="runAction($event, () => emit('polishShortcut', account))">一键擦亮记录</button>
                     <div class="account-action-menu__divider"></div>
                     <button type="button" role="menuitem" @click="runAction($event, () => emit('edit', account))"><IconEdit /> 编辑账号资料</button>
                     <button type="button" role="menuitem" :disabled="!isRiskPaused(account)" @click="runAction($event, () => emit('resumeAutomation', account))">恢复自动化</button>
@@ -1628,6 +1632,97 @@ button.automation-chip--toggle.automation-chip--on:hover {
 
   .empty-state {
     padding: 40px 16px;
+  }
+}
+
+/* ===== 自动化开关 =====
+   整行可点：点击后打开对应功能的设置面板（评价文案 / 求花 / 擦亮时间）。
+   右侧是标准开关形态，避免被误认为状态图标。 */
+.automation-switch {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--c-text-3);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  text-align: left;
+  cursor: pointer;
+  transition: background .15s, color .15s;
+}
+
+.automation-switch:hover {
+  background: rgba(60, 60, 67, .05);
+  color: var(--c-text-1, #1f2937);
+}
+
+.automation-switch:focus-visible {
+  outline: 2px solid #3972bd;
+  outline-offset: 1px;
+}
+
+.automation-switch__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-switch__track {
+  position: relative;
+  flex: 0 0 auto;
+  width: 34px;
+  height: 20px;
+  border-radius: 999px;
+  background: #d7dce3;
+  box-shadow: inset 0 0 0 1px rgba(60, 60, 67, .06);
+  transition: background .18s ease;
+}
+
+.automation-switch__track--on {
+  background: #34c759;
+  box-shadow: inset 0 0 0 1px rgba(22, 132, 66, .18);
+}
+
+.automation-switch__knob {
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .25);
+  transition: transform .18s ease;
+}
+
+.automation-switch__track--on .automation-switch__knob {
+  transform: translateX(14px);
+}
+
+/* 三个开关竖向排列，移动卡片与桌面卡片一致 */
+.account-card__automation-list {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+}
+
+.account-overview-card__automation-items {
+  display: grid;
+  gap: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .automation-switch__track,
+  .automation-switch__knob {
+    transition: none;
   }
 }
 </style>

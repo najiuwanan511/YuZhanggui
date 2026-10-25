@@ -88,6 +88,12 @@ watch(() => props.activeSection, (section) => {
   selectedSection.value = section || 'profile'
 }, { immediate: true })
 
+// 每次打开都按外部指定的分节重置：否则连续点不同开关时，
+// activeSection 可能没变化，弹窗会停在上次手动切换的分节上。
+watch(() => props.modelValue, (open) => {
+  if (open) selectedSection.value = props.activeSection || 'profile'
+})
+
 const handleClose = () => {
   emit('update:modelValue', false)
 }
