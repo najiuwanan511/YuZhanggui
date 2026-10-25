@@ -249,7 +249,7 @@ onUnmounted(() => {
         <div class="brand">
           <span class="brand__mark"><BrandMark /></span>
           <span class="brand__copy">
-            <strong>鱼掌柜 <em>2.0</em></strong>
+            <strong>鱼掌柜</strong>
             <small>多账号卖家助手</small>
           </span>
         </div>
@@ -296,7 +296,7 @@ onUnmounted(() => {
           <div class="drawer-header">
             <div class="brand brand--drawer">
               <span class="brand__mark"><BrandMark /></span>
-              <span class="brand__copy"><strong>鱼掌柜 <em>2.0</em></strong><small>多账号卖家助手</small></span>
+              <span class="brand__copy"><strong>鱼掌柜</strong><small>多账号卖家助手</small></span>
             </div>
             <button class="drawer-close-btn" type="button" aria-label="关闭导航菜单" @click="closeDrawer">×</button>
           </div>

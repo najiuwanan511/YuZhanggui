@@ -6,7 +6,7 @@
 
 商品、订单、卡券、发货、客服与自动化，收进一个后台
 
-<img src="https://img.shields.io/badge/version-3.0.0-2f81f7" alt="version">
+<img src="https://img.shields.io/badge/version-1.0.0-2f81f7" alt="version">
 <img src="https://img.shields.io/badge/Java-21-ED8B00" alt="Java 21">
 <img src="https://img.shields.io/badge/Vue-3-42b883" alt="Vue 3">
 <img src="https://img.shields.io/badge/Docker-Compose-2496ED" alt="Docker Compose">
@@ -100,16 +100,6 @@ cd ~/yuzhanggui
 ```
 
 保留数据卷，重新构建并重启。更新前建议先备份。
-
-### 从旧版本迁移
-
-2.x 版本更名为鱼掌柜后，容器名、数据卷名与默认库名都变了，**不能原地覆盖更新**。请先备份，再在旧项目目录执行：
-
-```bash
-./migrate-from-legacy.sh
-```
-
-脚本会导出旧库、复用旧数据卷、切到新目录启动，并保留原来的项目目录与备份文件。
 
 ## 首次配置顺序
 
