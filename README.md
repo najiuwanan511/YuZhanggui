@@ -6,7 +6,7 @@
 
 商品、订单、卡券、发货、客服与自动化，收进一个后台
 
-<img src="https://img.shields.io/badge/version-1.0.0-2f81f7" alt="version">
+<img src="https://img.shields.io/badge/version-1.0.1-2f81f7" alt="version">
 <img src="https://img.shields.io/badge/Java-21-ED8B00" alt="Java 21">
 <img src="https://img.shields.io/badge/Vue-3-42b883" alt="Vue 3">
 <img src="https://img.shields.io/badge/Docker-Compose-2496ED" alt="Docker Compose">
@@ -87,6 +87,8 @@ cd YuZhanggui
 chmod +x install.sh
 ./install.sh
 ```
+
+重装或换目录安装时，如果机器上还留着旧的数据库数据卷，脚本会先问你要不要保留数据；不想交互就直接用 `./install.sh --fresh` 清空数据卷全新安装。
 
 **访问** `http://你的设备IP:12400`，首次进入按引导创建管理员账号。
 
@@ -215,7 +217,19 @@ docker compose down                        # 停止（不删数据卷）
 
 业务数据在 Docker 数据卷里。除非已确认完成备份，不要执行 `docker compose down -v`。
 
-`.env`、Cookie、Token、卡密与供应商密钥请妥善保管，不要提交到仓库或发给他人。
+`.env`、Cookie、Token、卡密与供应商密钥请妥善保管，不要提交到仓库或发给他人。**尤其要备份 `.env`**：数据库密码在里面，丢失后即使数据卷还在也无法连接。
+
+### 启动报 Access denied（MySQL 1045）
+
+应用反复重启、日志中出现 `Access denied for user 'yuzhanggui'@'...'`，说明 `.env` 里的数据库密码与数据卷中保存的账号密码不一致——重装时生成了新密码，却保留了旧数据卷（MySQL 只在数据卷为空时初始化账号）。
+
+不需要旧数据（重装 / 升级场景）：
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+需要保留旧数据：把原来的 `.env` 复制回项目目录，或执行 `./install.sh --keep-data` 并按提示输入原密码。
 
 ## 页面预览
 
