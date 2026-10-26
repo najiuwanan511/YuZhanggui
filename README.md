@@ -6,7 +6,7 @@
 
 商品、订单、卡券、发货、客服与自动化，收进一个后台
 
-<img src="https://img.shields.io/badge/version-1.0.2-2f81f7" alt="version">
+<img src="https://img.shields.io/badge/version-1.0.3-2f81f7" alt="version">
 <img src="https://img.shields.io/badge/Java-21-ED8B00" alt="Java 21">
 <img src="https://img.shields.io/badge/Vue-3-42b883" alt="Vue 3">
 <img src="https://img.shields.io/badge/Docker-Compose-2496ED" alt="Docker Compose">
