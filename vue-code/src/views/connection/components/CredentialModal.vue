@@ -60,11 +60,12 @@ const verificationRequired = computed(() =>
 
 const repairActionLabel = computed(() => {
   if (props.repairing) return '正在修复连接…'
-  return verificationRequired.value ? '在此完成安全验证' : '修复连接'
+  return verificationRequired.value ? '继续验证并修复' : '修复连接'
 })
 
 const repairHint = computed(() => {
-  if (verificationRequired.value) return '请在站内服务器验证画面中手动完成安全验证。验证凭证会自动保存并重新检查连接，无需再次扫码；也可通过高级操作导入完整 Cookie。'
+  if (verificationRequired.value && props.connectionStatus?.captchaRemoteEnabled) return '飞牛远程验证画面已启动，请打开 noVNC 页面完成滑块；验证通过后系统会自动回收凭证。'
+  if (verificationRequired.value) return '平台要求安全验证。完成验证后更新 Cookie，系统会自动恢复连接。'
   if (props.connectionStatus?.connected) return '当前连接正常；需要时点击一次，系统会自动检查Token并恢复连接。'
   return '系统会先自动刷新Token并重连；自动处理未完成时才引导扫码更新。'
 })
@@ -320,7 +321,7 @@ const toggleAdvancedActions = () => {
               <strong>当前账号需要平台验证</strong>
               <p>账号：{{ accountName || '未设置备注' }} · UNB：{{ accountUnb || '--' }}</p>
               <p v-if="connectionStatus?.captchaRemoteEnabled">请打开远程验证画面完成滑块；完成后保持页面打开，系统会自动恢复连接。</p>
-              <p v-else>点击“在此完成安全验证”，直接操作服务器画面；验证后自动检查连接状态。</p>
+              <p v-else>完成平台验证后更新 Cookie，系统会自动恢复连接。</p>
               <a v-if="remoteBrowserUrl" class="remote-browser-link" :href="remoteBrowserUrl" target="_blank" rel="noopener noreferrer">打开飞牛远程验证画面</a>
             </div>
           </div>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { ref, watch } from 'vue'
 import { updateCookie } from '@/api/websocket'
-import { showInfo, showError } from '@/utils'
+import { showSuccess, showError } from '@/utils'
 import IconClose from '@/components/icons/IconClose.vue'
 import IconHelp from '@/components/icons/IconHelp.vue'
 
@@ -9,8 +9,6 @@ interface Props {
   modelValue: boolean
   accountId: number
   currentCookie: string
-  accountUnb?: string
-  verificationRequired?: boolean
 }
 
 interface Emits {
@@ -24,15 +22,11 @@ const emit = defineEmits<Emits>()
 const cookieText = ref('')
 const loading = ref(false)
 const showHelpGuide = ref(false)
-const missingVerificationCookie = computed(() => props.verificationRequired && cookieText.value.trim()
-  && !/(?:^|;)\s*x5sec\s*=\s*[^;\s]+/i.test(cookieText.value))
-const submitError = ref('')
 
 watch(() => props.modelValue, (newVal) => {
   if (newVal) {
     cookieText.value = props.currentCookie || ''
     showHelpGuide.value = false
-    submitError.value = ''
   }
 })
 
@@ -43,23 +37,19 @@ const handleSubmit = async () => {
   }
 
   loading.value = true
-  submitError.value = ''
   try {
     const response = await updateCookie({
       xianyuAccountId: props.accountId,
       cookieText: cookieText.value.trim()
     })
 
-    if (response.code === 0 || response.code === 200) {
-      showInfo(response.data?.message || 'Cookie 已保存，正在检查消息连接状态')
+    if (response.code === 200) {
+      showSuccess(response.data?.message || 'Cookie更新成功')
       handleClose()
       emit('success')
-    } else {
-      submitError.value = response.msg || 'Cookie 更新未完成，请重试'
     }
-  } catch (error: unknown) {
-    // Axios errors can contain the submitted Cookie; never print the request object.
-    submitError.value = error instanceof Error ? error.message : 'Cookie 更新失败，请重试'
+  } catch (error: any) {
+    console.error('Cookie更新失败:', error)
   } finally {
     loading.value = false
   }
@@ -93,23 +83,15 @@ const toggleHelpGuide = () => {
 
         <!-- Content -->
         <div class="modal-content">
-          <div v-if="verificationRequired" class="tips-container">
-            <div class="tips-title">导入刚完成验证的浏览器凭证</div>
-            <div class="tips-content">
-              <p v-if="accountUnb" class="tips-text">当前账号 UNB：{{ accountUnb }}，请确认网页登录的是这个账号。</p>
-              <p class="tips-text">请使用同一浏览器中验证后的完整 Cookie，包含 x5sec。重新扫码生成的 Cookie 不会带回这次网页验证结果。</p>
-            </div>
-          </div>
           <!-- Cookie 获取步骤 -->
           <div v-if="showHelpGuide" class="tips-container">
             <div class="tips-title">Cookie 获取步骤</div>
             <div class="tips-content">
               <ol class="tips-text">
-                <li>在刚完成验证的同一浏览器中打开闲鱼消息页面，确认登录账号一致。</li>
-                <li>按 F12，选择 Network（网络），刷新消息页面。</li>
-                <li>筛选 pc.login.token，选择发送到 h5api.m.goofish.com 的请求。</li>
-                <li>在 Headers → Request Headers 中找到 Cookie，复制整段值（不是响应里的 Set-Cookie）。</li>
-                <li>回到此处粘贴并确定更新；消息连接结果以账号详情为准。</li>
+                <li>登录闲鱼网页版并打开消息页面</li>
+                <li>按 F12 打开开发者工具并选择 Network</li>
+                <li>刷新页面并选择任意 goofish 请求</li>
+                <li>在 Request Headers 中复制完整 Cookie</li>
               </ol>
               <p class="tips-text">Cookie 仅用于当前私有服务，请勿截图、分享或提交到代码仓库。</p>
             </div>
@@ -125,8 +107,6 @@ const toggleHelpGuide = () => {
                 placeholder="请输入完整的Cookie字符串"
                 rows="8"
               />
-              <p v-if="missingVerificationCookie" class="tips-text" role="status">当前内容未包含 x5sec，请核对是否复制了刚完成验证的 h5api.m.goofish.com 请求 Cookie。</p>
-              <p v-if="submitError" class="tips-text" role="alert">{{ submitError }}</p>
             </div>
 
             <!-- Tips -->
@@ -141,13 +121,20 @@ const toggleHelpGuide = () => {
                   <span class="tips-field">cookie2</span>、
                   <span class="tips-field">t</span>
                 </p>
-                <p class="tips-text tips-text--bold">格式示意（请复制实际完整值，勿使用示例）：</p>
+                <p class="tips-text tips-text--bold">格式示例：</p>
                 <p class="tips-example">
-                  <span class="tips-field">unb</span>=当前账号ID;
-                  <span class="tips-field">_m_h5_tk</span>=当前值;
-                  <span class="tips-field">cookie2</span>=当前值;
-                  sgcookie=当前值;
-                  <span class="tips-field">x5sec</span>=验证后的值; ...
+                  <span class="tips-field">unb</span>=2218021801256;
+                  cookies=sgcookie=E100JgD87TWZ...;
+                  <span class="tips-field">t</span>=97df36d73d5e5bfb...;
+                  tracknick=xy246940070033;
+                  csg=f7aeab6d;
+                  _m_h5_tk_enc=51ce7936ea...;
+                  XSRF-TOKEN=bb76b331-48fb-496b...;
+                  _samesite_flag_=true;
+                  mtop_partitioned_detect=1;
+                  <span class="tips-field">_m_h5_tk</span>=5f73f84e8caa...;
+                  _tb_token_=e3f1fd5ee5a34;
+                  <span class="tips-field">cookie2</span>=153aeae482f715e0...
                 </p>
               </div>
             </div>
@@ -156,7 +143,7 @@ const toggleHelpGuide = () => {
 
         <!-- Footer -->
         <div class="modal-footer">
-          <button class="btn btn--secondary" @click="showHelpGuide ? toggleHelpGuide() : handleClose()">
+          <button class="btn btn--secondary" @click="handleClose">
             {{ showHelpGuide ? '返回' : '取消' }}
           </button>
           <button v-if="!showHelpGuide" class="btn btn--primary" :disabled="loading" @click="handleSubmit">

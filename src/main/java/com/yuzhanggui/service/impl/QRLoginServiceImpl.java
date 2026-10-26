@@ -748,6 +748,7 @@ public class QRLoginServiceImpl implements QRLoginService {
                     session.getSessionId(), session.getCookies().keySet());
             return;
         }
+        session.setStatus("success");
         saveCookieToDatabase(session);
     }
 
@@ -968,7 +969,6 @@ public class QRLoginServiceImpl implements QRLoginService {
             Long accountId = accountService.saveAccountAndCookie(accountNote, unb, cookieText, mH5Tk);
             
             if (accountId != null && accountId > 0) {
-                session.setStatus("success");
                 log.info("✅ 扫码登录成功！Cookie已保存到数据库");
                 log.info("   - 会话ID: {}", session.getSessionId());
                 log.info("   - 账号ID: {}", accountId);

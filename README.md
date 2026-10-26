@@ -157,20 +157,16 @@ cd ~/yuzhanggui
 <details>
 <summary><b>账号验证与远程浏览器</b></summary>
 
+v1.0.6 已将登录、扫码、Cookie 更新及验证页面恢复为原 xianyu-plus v2.3.25 的实现，撤回 v1.0.5 的站内验证画面。鱼掌柜名称及其他业务功能保留。
+
 平台返回 `FAIL_SYS_USER_VALIDATE` 时，该账号会立刻置为待验证，停止业务 API、Token 刷新与 WebSocket 重连。
 
-从 v1.0.5 起，优先使用 **账号详情 → 凭证更新 → 在此完成安全验证**。窗口显示服务器当前账号的验证画面，直接在画面中点击或拖动即可。取得新的验证 Cookie 后，程序会保存并检查消息连接；只有实际连接成功才显示恢复。**验证后不要再次扫码**，新扫码凭证不会自动带回另一个浏览器的验证结果。
-
-站内验证使用账号独立的临时浏览器，沿用当前数据库登录凭证，支持默认无头容器；无需开放 7900 端口或配置 VNC。一次允许一个账号验证，会话最长 10 分钟，关闭或超时会释放浏览器。验证过程中如果重新登录或修改 Cookie，旧验证不能覆盖新的登录状态。若平台仍要求验证，可重新加载验证页；这不代表能绕过平台风控。
-
-- `CAPTCHA_BROWSER_ENABLED` 须保持启用（默认 `true`）；官方镜像已包含 Chromium
-- 独立 JAR 未安装 Playwright Chromium 时会尝试系统 Chrome / Edge
-- 下列桌面弹窗、VNC 与手动 Cookie 导入方式仍可作为备用
-
-原远程浏览器模式使用账号独立且持久化的存储、固定 User-Agent、时区与窗口尺寸；完成滑块后只回写该账号的新 `x5sec` Cookie。
+每个账号使用独立且持久化的浏览器存储、固定 User-Agent、时区与窗口尺寸；完成滑块后只回写该账号的新 `x5sec` Cookie，不与其他账号共享登录状态。
 
 - 桌面部署可设 `CAPTCHA_BROWSER_HEADLESS=false` 直接弹窗处理
-- `CAPTCHA_BROWSER_MAX_CONCURRENT` 控制原远程浏览器模式同时处理的验证数量，默认 1
+- 容器部署默认无头，可用手动更新 Cookie 兜底
+- 独立 JAR 未安装 Playwright Chromium 时会尝试系统 Chrome / Edge
+- `CAPTCHA_BROWSER_MAX_CONCURRENT` 控制同时处理的验证数量，默认 1
 
 只用 Docker 的飞牛 OS，可开启容器内远程浏览器：
 
@@ -185,16 +181,6 @@ docker compose up -d --build
 ```
 
 然后在同局域网浏览器打开 `http://飞牛IP:7900/vnc.html?autoconnect=true&resize=scale` 完成滑块。VNC 密码最多取前 8 个字符；7900 端口建议只绑定内网地址或走反向代理。
-
-如果在自己电脑的跳转网页中已经验证，返回后再次扫码仍提示需要验证，请优先使用站内验证；也可导入该浏览器的完整 Cookie。
-网页验证结果不会通过新一次扫码自动传回服务器。日志出现 `FAIL_SYS_USER_VALIDATE`，同时提示
-“当前为无头浏览器，跳过人工滑块”，说明服务器没有运行人工验证窗口。
-
-在刚完成验证的同一浏览器打开闲鱼消息页，按 F12 进入 Network 并刷新，筛选 `pc.login.token`，
-选择发送到 `h5api.m.goofish.com` 的请求，从 Request Headers 复制完整 `Cookie` 值（包括 `x5sec`）。
-回到“账号详情 → 凭证更新 → 高级操作 → 手动更新Cookie”导入，核对 `unb` 与当前账号一致。
-Cookie 保存与消息连接是两个结果；导入后请查看实际 WebSocket 状态。若平台仍不接受服务器环境，
-需要在站内验证窗口或上述服务器远程浏览器中完成人工验证。
 
 </details>
 
