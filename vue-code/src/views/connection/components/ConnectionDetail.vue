@@ -55,6 +55,7 @@ const props = defineProps<Props>()
 
 interface Emits {
   (e: 'statusChange', accountId: number, connected: boolean): void
+  (e: 'credentialUpdated', accountId: number): void
 }
 
 const emit = defineEmits<Emits>()
@@ -272,7 +273,7 @@ const handleRepairConnection = async () => {
       throw new Error(started.msg || '重新连接失败')
     }
 
-    await loadConnectionStatus(true)
+    await syncAfterCredentialUpdate()
     showSuccess('连接已自动修复，无需其他操作')
   } catch (error: unknown) {
     await loadConnectionStatus(true)
@@ -293,12 +294,52 @@ const handleRefresh = async () => {
   showInfo('状态已刷新')
 }
 
-const handleManualUpdateCookieSuccess = async () => {
+let reconnectTimer: number | null = null
+
+const stopReconnectWatch = () => {
+  if (reconnectTimer) {
+    clearInterval(reconnectTimer)
+    reconnectTimer = null
+  }
+}
+
+// 凭证更新后后端重建连接是异步的：先立刻回查一次，还没连上就每 2 秒跟一次，
+// 最多跟 15 秒。状态一变化就通知外层刷新账号列表，不用手动刷新页面。
+const trackReconnectUntilConnected = () => {
+  if (!props.accountId) return
+  stopReconnectWatch()
+  const deadline = Date.now() + 15000
+  reconnectTimer = window.setInterval(async () => {
+    if (!props.accountId) {
+      stopReconnectWatch()
+      return
+    }
+    const wasConnected = connectionStatus.value?.connected === true
+    await loadConnectionStatus(true)
+    const isConnected = connectionStatus.value?.connected === true
+    if (isConnected !== wasConnected || isConnected || Date.now() >= deadline) {
+      stopReconnectWatch()
+      emit('credentialUpdated', props.accountId)
+    }
+  }, 2000)
+}
+
+const syncAfterCredentialUpdate = async () => {
   await loadConnectionStatus(true)
+  if (!props.accountId) return
+  if (connectionStatus.value?.connected === true) {
+    emit('credentialUpdated', props.accountId)
+    return
+  }
+  trackReconnectUntilConnected()
+}
+
+const handleManualUpdateCookieSuccess = async () => {
+  await syncAfterCredentialUpdate()
 }
 
 const handleQRUpdateSuccess = async () => {
-  await loadConnectionStatus(true)
+  await syncAfterCredentialUpdate()
 }
 
 const canSyncGoods = computed(() => connectionStatus.value?.cookieStatus === 1)
@@ -306,6 +347,7 @@ const canAutoReply = computed(() => connectionStatus.value?.connected === true)
 
 watch(() => props.accountId, (newId) => {
   clearVerificationReturnWatch()
+  stopReconnectWatch()
   if (newId) {
     loadConnectionStatus()
     if (statusInterval) clearInterval(statusInterval)
@@ -325,6 +367,7 @@ watch(() => props.accountId, (newId) => {
 
 onBeforeUnmount(() => {
   if (statusInterval) clearInterval(statusInterval)
+  stopReconnectWatch()
   clearVerificationReturnWatch()
 })
 </script>

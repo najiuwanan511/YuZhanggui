@@ -75,6 +75,12 @@ const updateConnectionStatus = (accountId: number, connected: boolean) => {
   if (account) account.websocketConnected = connected
 }
 
+// 凭证更新 / 扫码更新 / 自动修复完成后，重新拉取列表，
+// 让账号卡片上的连接指示灯跟着变，不需要手动刷新页面。
+const handleCredentialUpdated = () => {
+  void loadAccounts()
+}
+
 const openAccountEditor = (account: Account, section: AccountEditorSection = 'profile') => {
   activeEditorSection.value = section
   editAccount(account)
@@ -147,6 +153,7 @@ void loadAccounts();
             :account-unb="selectedConnectionAccount.unb"
             :auto-connect-on-startup="selectedConnectionAccount.autoConnectOnStartup"
             @status-change="updateConnectionStatus"
+            @credential-updated="handleCredentialUpdated"
           />
         </div>
       </aside>
