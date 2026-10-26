@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useAccountManager } from './useAccountManager'
 import AccountTable from './components/AccountTable.vue'
 import AddAccountDialog from './components/AddAccountDialog.vue'
+import AutomationSettingsPopover from './components/AutomationSettingsPopover.vue'
 import ManualAddDialog from './components/ManualAddDialog.vue'
 import QRLoginDialog from './components/QRLoginDialog.vue'
 import DeleteConfirmDialog from './components/DeleteConfirmDialog.vue'
@@ -16,12 +17,22 @@ import IconSync from '@/components/icons/IconSync.vue'
 
 defineOptions({ name: 'AccountManagement' })
 
-type AccountEditorSection = 'profile' | 'rate' | 'flower' | 'polish'
-
 const route = useRoute()
 const router = useRouter()
 const selectedConnectionAccountId = ref<number | null>(null)
-const activeEditorSection = ref<AccountEditorSection>('profile')
+const automationSaving = ref(false)
+const automationEditor = shallowRef<{
+  account: Account
+  section: 'rate' | 'flower' | 'polish'
+  anchor: HTMLElement
+} | null>(null)
+
+const openAutomationSettings = (account: Account, section: 'rate' | 'flower' | 'polish', event: MouseEvent) => {
+  if (automationSaving.value) return
+  if (event.currentTarget instanceof HTMLElement) {
+    automationEditor.value = { account, section, anchor: event.currentTarget }
+  }
+}
 
 const {
   loading,
@@ -75,17 +86,6 @@ const updateConnectionStatus = (accountId: number, connected: boolean) => {
   if (account) account.websocketConnected = connected
 }
 
-// 凭证更新 / 扫码更新 / 自动修复完成后，重新拉取列表，
-// 让账号卡片上的连接指示灯跟着变，不需要手动刷新页面。
-const handleCredentialUpdated = () => {
-  void loadAccounts()
-}
-
-const openAccountEditor = (account: Account, section: AccountEditorSection = 'profile') => {
-  activeEditorSection.value = section
-  editAccount(account)
-}
-
 watch([accounts, () => route.query.accountId, () => route.query.connection], syncConnectionSelection, { immediate: true })
 
 void loadAccounts();
@@ -126,8 +126,8 @@ void loadAccounts();
         <AccountTable
           :accounts="accounts"
           :loading="loading"
-          @edit="openAccountEditor"
-          @automation-settings="(account, section) => openAccountEditor(account, section)"
+          @edit="editAccount"
+          @automation-settings="openAutomationSettings"
           @toggle-automation="toggleAutomation"
           @save-note="saveAccountNote"
           @delete="deleteAccount"
@@ -153,7 +153,6 @@ void loadAccounts();
             :account-unb="selectedConnectionAccount.unb"
             :auto-connect-on-startup="selectedConnectionAccount.autoConnectOnStartup"
             @status-change="updateConnectionStatus"
-            @credential-updated="handleCredentialUpdated"
           />
         </div>
       </aside>
@@ -173,10 +172,19 @@ void loadAccounts();
     </footer>
 
     <!-- Dialogs -->
+    <AutomationSettingsPopover
+      v-if="automationEditor"
+      :key="`${automationEditor.account.id}:${automationEditor.section}`"
+      :account="automationEditor.account"
+      :section="automationEditor.section"
+      :anchor="automationEditor.anchor"
+      @busy="automationSaving = $event"
+      @close="automationEditor = null"
+      @success="loadAccounts"
+    />
     <AddAccountDialog
       v-model="dialogs.add"
       :account="currentAccount"
-      :active-section="activeEditorSection"
       @success="loadAccounts"
     />
     <ManualAddDialog v-model="dialogs.manualAdd" @success="loadAccounts" />
