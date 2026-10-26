@@ -19,8 +19,8 @@ for arg in "$@"; do
             cat <<'EOF'
 用法: ./install.sh [选项]
 
-  --fresh       检测到已有数据库数据卷时，删除数据卷并全新安装（会清空数据）
-  --keep-data   检测到已有数据库数据卷时，保留数据并按提示输入原数据库密码
+  --fresh       清空数据库数据卷全新安装（忽略现有 .env，会清空数据）
+  --keep-data   保留已有数据卷，按提示输入原数据库密码
   -h, --help    显示本帮助
 EOF
             exit 0
@@ -149,6 +149,16 @@ prompt_keep_data_password() {
     chmod 600 .env
 }
 
+fresh_install() {
+    echo "本次为全新安装：将清空数据库数据卷 $MYSQL_DATA_VOLUME 并重新生成 .env。"
+    docker compose down --remove-orphans >/dev/null 2>&1 || true
+    if volume_exists "$MYSQL_DATA_VOLUME"; then
+        remove_mysql_volume
+    fi
+    rm -f .env
+    generate_env
+}
+
 resolve_existing_volume() {
     echo
     echo "检测到已存在的数据库数据卷: $MYSQL_DATA_VOLUME"
@@ -158,12 +168,6 @@ resolve_existing_volume() {
 
     if restore_env_from_backup; then
         echo "继续使用现有数据卷。"
-        return 0
-    fi
-
-    if [ "$FORCE_MODE" = "fresh" ]; then
-        remove_mysql_volume
-        generate_env
         return 0
     fi
 
@@ -202,7 +206,9 @@ resolve_existing_volume() {
     esac
 }
 
-if [ ! -f .env ]; then
+if [ "$FORCE_MODE" = "fresh" ]; then
+    fresh_install
+elif [ ! -f .env ]; then
     if volume_exists "$MYSQL_DATA_VOLUME"; then
         resolve_existing_volume
     else

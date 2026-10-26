@@ -6,7 +6,7 @@
 
 商品、订单、卡券、发货、客服与自动化，收进一个后台
 
-<img src="https://img.shields.io/badge/version-1.0.1-2f81f7" alt="version">
+<img src="https://img.shields.io/badge/version-1.0.2-2f81f7" alt="version">
 <img src="https://img.shields.io/badge/Java-21-ED8B00" alt="Java 21">
 <img src="https://img.shields.io/badge/Vue-3-42b883" alt="Vue 3">
 <img src="https://img.shields.io/badge/Docker-Compose-2496ED" alt="Docker Compose">
@@ -77,7 +77,11 @@ flowchart LR
 curl -fsSL https://raw.githubusercontent.com/najiuwanan511/YuZhanggui/main/install-online.sh | bash
 ```
 
-脚本会下载到 `~/yuzhanggui`，生成 `.env` 与运行密钥，构建镜像并启动 MySQL 与应用。目录已存在时会直接中止，不会覆盖现有文件。
+脚本会下载到 `~/yuzhanggui`，生成 `.env` 与运行密钥，构建镜像并启动 MySQL 与应用。目录已存在时不会覆盖现有文件，而是列出「就地更新 / 清空数据重装 / 换目录安装」三条命令；想一步重装可加 `--fresh`：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/najiuwanan511/YuZhanggui/main/install-online.sh | bash -s -- --fresh
+```
 
 ### 手动安装
 
@@ -230,6 +234,12 @@ docker compose down -v && docker compose up -d --build
 ```
 
 需要保留旧数据：把原来的 `.env` 复制回项目目录，或执行 `./install.sh --keep-data` 并按提示输入原密码。
+
+已经装过、只想清库重装：
+
+```bash
+cd ~/yuzhanggui && git pull --ff-only origin main && ./install.sh --fresh
+```
 
 ## 页面预览
 
