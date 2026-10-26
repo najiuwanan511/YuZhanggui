@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { generateQRCode, getQRCodeStatus, getQRCodeCookies } from '@/api/qrlogin'
-import { showSuccess, showError } from '@/utils'
+import { showInfo, showError } from '@/utils'
 import type { QRLoginSession } from '@/types'
 
 interface Props {
@@ -175,7 +175,7 @@ const handleLoginSuccess = async () => {
 
     // 二维码确认时后端已经保存 Cookie，并启动该账号的凭证恢复流程。
     // 这里不要再次调用 /websocket/updateCookie，否则会并发触发第二次重连。
-    showSuccess('扫码成功，Cookie 已保存，连接正在后台恢复')
+    showInfo('扫码凭证已保存；如仍需验证，请在账号详情中点击“在此完成安全验证”')
 
     emit('success')
     handleClose()

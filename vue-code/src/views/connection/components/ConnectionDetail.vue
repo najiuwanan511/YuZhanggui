@@ -8,6 +8,7 @@ import { showSuccess, showError, showInfo } from '@/utils'
 import CredentialModal from './CredentialModal.vue'
 import ManualUpdateCookieModal from './ManualUpdateCookieModal.vue'
 import QRUpdateDialog from './QRUpdateDialog.vue'
+import ServerVerificationDialog from './ServerVerificationDialog.vue'
 
 import IconKey from '@/components/icons/IconKey.vue'
 import IconPlay from '@/components/icons/IconPlay.vue'
@@ -55,6 +56,7 @@ const props = defineProps<Props>()
 
 interface Emits {
   (e: 'statusChange', accountId: number, connected: boolean): void
+  (e: 'credentialUpdated', accountId: number): void
 }
 
 const emit = defineEmits<Emits>()
@@ -68,6 +70,7 @@ let statusInterval: number | null = null
 const showManualUpdateCookieDialog = ref(false)
 const showQRUpdateDialog = ref(false)
 const showCredentialDialog = ref(false)
+const showServerVerificationDialog = ref(false)
 const repairingConnection = ref(false)
 const autoConnectOnStartup = ref(props.autoConnectOnStartup !== 0)
 
@@ -97,14 +100,16 @@ const handleAutoConnectChange = async () => {
 
 const loadConnectionStatus = async (silent = false) => {
   if (!props.accountId) return
+  const accountId = props.accountId
   if (!silent) statusLoading.value = true
   try {
-    const response = await getConnectionStatus(props.accountId)
+    const response = await getConnectionStatus(accountId)
+    if (props.accountId !== accountId) return
     if (response.code === 0 || response.code === 200) {
       const status = response.data as ConnectionStatus | undefined
       if (!status) throw new Error('连接状态数据为空')
       connectionStatus.value = status
-      emit('statusChange', props.accountId, status.connected === true)
+      emit('statusChange', accountId, status.connected === true)
     } else {
       throw new Error(response.msg || '获取连接状态失败')
     }
@@ -126,7 +131,7 @@ const handleStartConnection = async () => {
     } else if (response.code === 1001 && response.data?.needCaptcha) {
       await loadConnectionStatus(true)
       showCredentialDialog.value = true
-      showInfo(response.data?.message || '闲鱼要求网页安全验证，自动刷新与重连已暂停。请在凭证页点击“继续验证并修复”。')
+      showInfo(response.data?.message || '闲鱼要求网页安全验证，自动刷新与重连已暂停。请在凭证页点击“在此完成安全验证”。')
     } else {
       throw new Error(response.msg || '启动连接失败')
     }
@@ -164,69 +169,18 @@ const handleStopConnection = async () => {
   }
 }
 
-let verificationWindow: Window | null = null
-let verificationWindowTimer: number | null = null
-let verificationOpenedAt = 0
-
 const isVerificationRequired = () => connectionStatus.value?.captchaRequired === true
   || connectionStatus.value?.tokenRenewalState === 'VERIFICATION_REQUIRED'
 
-const clearVerificationReturnWatch = () => {
-  window.removeEventListener('focus', handleVerificationWindowFocus)
-  if (verificationWindowTimer) {
-    clearInterval(verificationWindowTimer)
-    verificationWindowTimer = null
-  }
-  verificationWindow = null
-  verificationOpenedAt = 0
-}
-
-const beginQRUpdateAfterVerification = () => {
-  clearVerificationReturnWatch()
-  showCredentialDialog.value = false
-  showQRUpdateDialog.value = true
-  showInfo('平台验证已完成后，请使用同一个闲鱼账号扫码更新；成功后系统会自动恢复连接')
-}
-
-const handleVerificationWindowFocus = () => {
-  if (!verificationOpenedAt || Date.now() - verificationOpenedAt < 1200) return
-  beginQRUpdateAfterVerification()
-}
-
-const getVerificationUrl = () => {
-  const captchaUrl = connectionStatus.value?.captchaUrl?.trim()
-  if (!captchaUrl) return 'https://www.goofish.com/im'
-
-  try {
-    const url = new URL(captchaUrl)
-    const host = url.hostname.toLowerCase()
-    const trustedHost = host === 'goofish.com' || host.endsWith('.goofish.com')
-      || host === 'taobao.com' || host.endsWith('.taobao.com')
-      || host === 'alibaba.com' || host.endsWith('.alibaba.com')
-    return url.protocol === 'https:' && trustedHost ? url.toString() : 'https://www.goofish.com/im'
-  } catch {
-    return 'https://www.goofish.com/im'
-  }
-}
-
 const handleOpenSecurityVerification = () => {
-  clearVerificationReturnWatch()
-  const opened = window.open(getVerificationUrl(), '_blank')
-  if (!opened) {
-    showError('浏览器拦截了新窗口，请允许本站打开闲鱼页面')
-    return false
-  }
-  verificationWindow = opened
-  verificationOpenedAt = Date.now()
-  try { opened.opener = null } catch { /* browser isolation */ }
-  window.addEventListener('focus', handleVerificationWindowFocus)
-  verificationWindowTimer = window.setInterval(() => {
-    try {
-      if (verificationWindow?.closed) beginQRUpdateAfterVerification()
-    } catch { /* cross-origin window state may be unavailable temporarily */ }
-  }, 800)
-  showInfo(`请确认浏览器登录的是“${props.accountName || props.accountUnb || '当前账号'}”；完成验证后返回本页，系统会自动弹出扫码更新`)
-  return true
+  showCredentialDialog.value = false
+  showServerVerificationDialog.value = true
+}
+
+const handleServerVerificationUpdated = async (accountId: number) => {
+  if (props.accountId !== accountId) return
+  await loadConnectionStatus(true)
+  if (props.accountId === accountId) emit('credentialUpdated', accountId)
 }
 
 const openQRRecovery = (message: string) => {
@@ -246,7 +200,7 @@ const handleRepairConnection = async () => {
   try {
     await loadConnectionStatus(true)
     if (isVerificationRequired()) {
-      showInfo('已检测到平台安全验证，请点击“继续验证并修复”打开闲鱼IM')
+      showInfo('已检测到平台安全验证，请点击“在此完成安全验证”操作服务器验证画面')
       return
     }
 
@@ -265,7 +219,7 @@ const handleRepairConnection = async () => {
     const started = await startConnection(props.accountId)
     if (started.code === 1001 && started.data?.needCaptcha) {
       await loadConnectionStatus(true)
-      showInfo(started.data?.message || '平台要求安全验证，请点击“继续验证并修复”')
+      showInfo(started.data?.message || '平台要求安全验证，请点击“在此完成安全验证”')
       return
     }
     if (started.code !== 0 && started.code !== 200) {
@@ -278,7 +232,7 @@ const handleRepairConnection = async () => {
     await loadConnectionStatus(true)
     if (isVerificationRequired()) {
       showCredentialDialog.value = true
-      showInfo('平台要求安全验证，请点击“继续验证并修复”')
+      showInfo('平台要求安全验证，请点击“在此完成安全验证”')
     } else {
       openQRRecovery(`自动修复未完成：${getErrorMessage(error)}。请扫码一次，系统将自动恢复连接`)
     }
@@ -294,18 +248,31 @@ const handleRefresh = async () => {
 }
 
 const handleManualUpdateCookieSuccess = async () => {
+  const accountId = props.accountId
   await loadConnectionStatus(true)
+  if (!accountId || props.accountId !== accountId) return
+  emit('credentialUpdated', accountId)
+  if (connectionStatus.value?.connected) {
+    showSuccess('已确认消息连接恢复')
+  } else if (isVerificationRequired()) {
+    showCredentialDialog.value = true
+    showInfo('Cookie 已保存，但平台仍要求验证。请核对账号及验证凭证；必要时使用服务器远程浏览器完成验证。')
+  }
 }
 
 const handleQRUpdateSuccess = async () => {
   await loadConnectionStatus(true)
+  if (isVerificationRequired()) {
+    showCredentialDialog.value = true
+    showInfo('扫码凭证已保存，平台仍要求消息验证。请点击“在此完成安全验证”，无需重复扫码。')
+  }
 }
 
 const canSyncGoods = computed(() => connectionStatus.value?.cookieStatus === 1)
 const canAutoReply = computed(() => connectionStatus.value?.connected === true)
 
 watch(() => props.accountId, (newId) => {
-  clearVerificationReturnWatch()
+  showManualUpdateCookieDialog.value = false
   if (newId) {
     loadConnectionStatus()
     if (statusInterval) clearInterval(statusInterval)
@@ -325,7 +292,6 @@ watch(() => props.accountId, (newId) => {
 
 onBeforeUnmount(() => {
   if (statusInterval) clearInterval(statusInterval)
-  clearVerificationReturnWatch()
 })
 </script>
 
@@ -432,10 +398,20 @@ onBeforeUnmount(() => {
       @manual-update="showCredentialDialog = false; showManualUpdateCookieDialog = true"
     />
 
+    <ServerVerificationDialog
+      v-model="showServerVerificationDialog"
+      :account-id="accountId || 0"
+      :account-name="accountName"
+      :account-unb="accountUnb"
+      @updated="handleServerVerificationUpdated"
+      @manual="showManualUpdateCookieDialog = true"
+    />
     <ManualUpdateCookieModal
       v-if="connectionStatus"
       v-model="showManualUpdateCookieDialog"
       :account-id="accountId || 0"
+      :account-unb="accountUnb"
+      :verification-required="isVerificationRequired()"
       current-cookie=""
       @success="handleManualUpdateCookieSuccess"
     />

@@ -64,6 +64,9 @@ public class CookieRefreshServiceImpl implements CookieRefreshService {
     @Autowired
     private PlaywrightManager playwrightManager;
 
+    @Autowired
+    private ManualVerificationScope manualVerificationScope;
+
     @Autowired(required = false)
     private com.yuzhanggui.service.EmailNotifyService emailNotifyService;
 
@@ -442,6 +445,7 @@ public class CookieRefreshServiceImpl implements CookieRefreshService {
 
     @Override
     public boolean completeCaptcha(Long accountId, String verificationUrl) {
+        if (manualVerificationScope != null && manualVerificationScope.owns(accountId)) return false;
         if (!captchaBrowserEnabled || (captchaBrowserHeadless && !captchaRemoteEnabled)
                 || accountId == null || verificationUrl == null
                 || verificationUrl.isBlank()) {

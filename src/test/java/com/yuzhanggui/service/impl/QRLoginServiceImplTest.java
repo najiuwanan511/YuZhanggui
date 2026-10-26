@@ -20,6 +20,33 @@ import static org.mockito.Mockito.when;
 class QRLoginServiceImplTest {
 
     @Test
+    void onlyReportsQrSuccessAfterPersistenceAndBeforeReconnect() {
+        QRLoginServiceImpl service = new QRLoginServiceImpl();
+        AccountService accounts = mock(AccountService.class);
+        WebSocketService sockets = mock(WebSocketService.class);
+        ReflectionTestUtils.setField(service, "accountService", accounts);
+        ReflectionTestUtils.setField(service, "webSocketService", sockets);
+        QRLoginSession session = new QRLoginSession("persistence-order");
+        session.setStatus("scanned");
+        session.setUnb("demo");
+        session.getCookies().put("unb", "demo");
+        session.getCookies().put("_m_h5_tk", "fresh_1");
+        when(accounts.saveAccountAndCookie(org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq("demo"), org.mockito.ArgumentMatchers.anyString(),
+                org.mockito.ArgumentMatchers.eq("fresh_1"))).thenAnswer(call -> {
+            assertEquals("scanned", session.getStatus());
+            return 1L;
+        });
+        when(sockets.restartAfterCredentialUpdate(1L)).thenAnswer(call -> {
+            assertEquals("success", session.getStatus());
+            return false;
+        });
+        ReflectionTestUtils.invokeMethod(service, "saveCookieToDatabase", session);
+        assertEquals("success", session.getStatus());
+        verify(sockets).restartAfterCredentialUpdate(1L);
+    }
+
+    @Test
     void mergesPassportCookiesAcrossQrRequests() {
         QRLoginSession session = new QRLoginSession("session-1");
 

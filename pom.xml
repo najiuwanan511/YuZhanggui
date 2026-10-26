@@ -10,7 +10,7 @@
     </parent>
     <groupId>com.yuzhanggui</groupId>
     <artifactId>yuzhanggui</artifactId>
-    <version>1.0.4</version>
+    <version>1.0.5</version>
     <name>YuZhanggui</name>
     <description>单商家私有化闲鱼虚拟商品经营助手</description>
     <url/>

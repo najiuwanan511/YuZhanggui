@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, computed } from 'vue'
 import { generateQRCode, getQRCodeStatus, getQRCodeCookies } from '@/api/qrlogin'
-import { showSuccess, showError } from '@/utils'
+import { showInfo, showError } from '@/utils'
 import type { QRLoginSession } from '@/types'
 
 interface Props {
@@ -176,7 +176,7 @@ const handleLoginSuccess = async () => {
       return
     }
 
-    showSuccess('账号添加成功，连接正在后台恢复')
+    showInfo('扫码凭证已保存；如仍需验证，请在账号详情中点击“在此完成安全验证”')
     emit('success')
 
     // 5. 关闭弹窗（无论成功失败都关闭）

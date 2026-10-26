@@ -153,6 +153,7 @@ void loadAccounts();
             :account-unb="selectedConnectionAccount.unb"
             :auto-connect-on-startup="selectedConnectionAccount.autoConnectOnStartup"
             @status-change="updateConnectionStatus"
+            @credential-updated="loadAccounts"
           />
         </div>
       </aside>
