@@ -245,13 +245,17 @@ cd ~/yuzhanggui && git pull --ff-only origin main && ./install.sh --fresh
 
 ## 页面预览
 
-| 账号与连接状态 | 订单管理 |
+| 账号管理 | 订单管理 |
 | --- | --- |
 | ![账号管理](docs/images/screenshots/01-account-management.png) | ![订单管理](docs/images/screenshots/05-order-management.png) |
 
-| 卡券与库存 | 自动化中心 |
+| 卡券管理 | 商品素材库 |
 | --- | --- |
-| ![卡券管理](docs/images/screenshots/09-card-library-edit.png) | ![自动化中心](docs/images/screenshots/14-automation-center.png) |
+| ![卡券管理](docs/images/screenshots/09-card-library-edit.png) | ![商品素材库](docs/images/screenshots/21-product-material-library.png) |
+
+| 系统设置 / AI 配置 | 自动化中心 |
+| --- | --- |
+| ![系统设置](docs/images/screenshots/19-ai-settings.png) | ![自动化中心](docs/images/screenshots/14-automation-center.png) |
 
 ## 技术栈
 
